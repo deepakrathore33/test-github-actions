@@ -32,7 +32,7 @@ jobs:
               const issueCreatedAt = new Date(issue.created_at);
               const currentTime = new Date();
               const timeSinceCreated = currentTime - issueCreatedAt;
-              const timeThreshold =  * 60 * 1000; // Convert days to milliseconds
+              const timeThreshold = 8 * 60 * 1000; // Convert days to milliseconds
 
               // Check if the issue has been in the untriaged state for more than the threshold (7 days)
               if (timeSinceCreated > timeThreshold) {
