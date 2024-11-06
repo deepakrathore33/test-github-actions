@@ -1,0 +1,31 @@
+name: "Spot Issues Missing Labels or Assignments"
+on:
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  check-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Check for issues without labels or assignees
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+            });
+            const noLabelsOrAssignees = issues.filter(issue => issue.labels.length === 0 || !issue.assignee);
+            for (const issue of noLabelsOrAssignees) {
+              console.log(`Issue #${issue.number} is missing labels or assignees.`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: "This issue is missing labels or an assignee. Please update accordingly.",
+              });
+            }
