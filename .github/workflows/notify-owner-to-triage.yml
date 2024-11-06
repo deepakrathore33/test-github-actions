@@ -37,15 +37,8 @@ jobs:
               // Check if the issue has been in the untriaged state for more than the threshold (7 days)
               if (timeSinceCreated > timeThreshold) {
                 // Send a reminder comment to the issue if it exceeds the threshold
-                const commentBody = `🚨 Reminder: This issue has been in the "triage" state for over a week and hasn't been triaged yet. Please review it.`;
+                const commentBody = `🚨 Reminder: This issue has been in the "untriaged" state for over a week and hasn't been triaged yet. Please review it.`;
                 
-                // Add a comment to the issue
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issue.number,
-                  body: commentBody
-                });
 
                 console.log(`Notified area owner about issue #${issue.number} awaiting triage.`);
               }
