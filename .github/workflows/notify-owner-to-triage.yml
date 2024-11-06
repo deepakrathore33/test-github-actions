@@ -3,6 +3,10 @@ name: 'Notify Area Owners to Triage Issues'
 on:
   workflow_dispatch: 
 
+permissions:
+  issues: write
+  contents: read
+  
 jobs:
   notify-area-owners:
     runs-on: ubuntu-latest
