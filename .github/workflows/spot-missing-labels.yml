@@ -1,6 +1,10 @@
 name: "Spot Issues Missing Labels or Assignments"
 on:
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch: 
+
+permissions:
+  issues: write
+  contents: read
 
 jobs:
   check-issues:
