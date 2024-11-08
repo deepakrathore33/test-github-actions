@@ -2,7 +2,7 @@ name: Collect Feedback Actions
 
 on:
   workflow_dispatch:
-  
+
 permissions:
   issues: read
   contents: read
@@ -34,8 +34,8 @@ jobs:
           (async () => {
             const owner = 'deepakrathore33';
             const repo = 'test-gha';
-            const label = 'collecting feedback';
-            const retriageLabel = 'retriage';
+            const label = 'collecting-feedback';
+            const retriageLabel = 'untriaged';
 
             // Get issues with 'collecting feedback' label
             const issues = await octokit.issues.listForRepo({
@@ -61,7 +61,7 @@ jobs:
 
               const upvotes = reactions.data.filter(reaction => reaction.content === '+1').length;
 
-              if (upvotes > 5) {
+              if (upvotes >= 1) {
                 // Remove 'collecting feedback' label and add 'retriage' label
                 await octokit.issues.removeLabel({
                   owner,
