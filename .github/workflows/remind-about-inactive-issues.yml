@@ -1,0 +1,49 @@
+name: 'Remind Owners About Inactive Issues'
+
+on:
+  workflow_dispatch: 
+
+permissions:
+  issues: read
+  contents: read
+
+jobs:
+  remind-owners:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Remind owners about inactive issues
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const inactivityThreshold = 30;  // Number of days without activity
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+            });
+
+            const currentTime = new Date();
+            const inactivityThresholdMs = inactivityThreshold * 60 * 1000; 
+
+            for (const issue of issues) {
+              // Check the last updated time of the issue (either comments, events, or commits)
+              const lastUpdatedTime = new Date(issue.updated_at);
+              const timeSinceLastUpdate = currentTime - lastUpdatedTime;
+
+              if (timeSinceLastUpdate > inactivityThresholdMs) {
+                const commentBody = `⚠️ Reminder: This issue has been inactive for over ${inactivityThreshold} days. Please review and provide an update.`;
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: commentBody,
+                });
+
+                console.log(`Notified about inactive issue #${issue.number} due to inactivity.`);
+              }
+            }
