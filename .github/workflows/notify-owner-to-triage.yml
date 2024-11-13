@@ -28,18 +28,20 @@ jobs:
               state: 'open',
             });
 
+            const currentTime = new Date();
+            const timeThreshold = daysWithoutAction * 24 * 60 * 60 * 1000; 
+
             for (const issue of issues) {
+              // Check if the issue does not have the "Area-Compilers" label
+              if (issue.labels.some(label => label.name === 'Area-Compilers')) {
+                continue;
+              }
+
               const issueCreatedAt = new Date(issue.created_at);
-              const currentTime = new Date();
               const timeSinceCreated = currentTime - issueCreatedAt;
-              const timeThreshold = 8 * 60 * 1000; // Convert days to milliseconds
 
               // Check if the issue has been in the untriaged state for more than the threshold (7 days)
               if (timeSinceCreated > timeThreshold) {
-                // Send a reminder comment to the issue if it exceeds the threshold
-                const commentBody = `🚨 Reminder: This issue has been in the "untriaged" state for over a week and hasn't been triaged yet. Please review it.`;
-                
-
-                console.log(`Notified area owner about issue #${issue.number} awaiting triage.`);
+                console.log(`Issue #${issue.number} has been in the "untriaged" state for over a week and hasn't been triaged yet.`);
               }
             }
