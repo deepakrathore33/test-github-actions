@@ -1,0 +1,42 @@
+name: "Labeler: Add Needs Area Label"
+
+on:
+  # Trigger when issues are opened, edited, labeled, or unlabeled
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+
+  # Allow manual dispatch via the Actions UI
+  workflow_dispatch:
+
+  # Schedule the workflow to run once a day at 13:00 UTC
+  schedule:
+    - cron: '0 13 * * *'
+
+permissions:
+  issues: write  # Required to add labels to issues
+
+jobs:
+  add-needs-area-label:
+    name: "Add Needs Area Label"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check and Add Needs Area Label
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const issue = context.payload.issue;
+
+            // Skip if the issue already has an 'area-*' label
+            const hasAreaLabel = issue.labels.some(label => label.name.startsWith('area-'));
+            if (hasAreaLabel) {
+              return; // Exit if an 'area-*' label exists
+            }
+
+            // Add the 'needs-area-label' label if missing
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: ['needs-area-label']
+            });
