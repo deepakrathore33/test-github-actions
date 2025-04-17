@@ -1,15 +1,13 @@
 name: "Spot Issues Missing Area Labels"
 
 on:
-  # Allow manual run
   workflow_dispatch:
 
-  # Scheduled run daily at 13:00 UTC
   schedule:
     - cron: '0 13 * * *'
 
 permissions:
-  issues: write  # Needed to add labels to issues
+  issues: write
   contents: read
 
 jobs:
@@ -32,13 +30,14 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
+              per_page: 100,
             });
 
             for (const issue of issues) {
               // Skip pull requests
               if (issue.pull_request) continue;
 
-              const labels = issue.labels.map(label => label.name.toLowerCase());
+              const labels = (issue.labels || []).map(label => (label.name || '').toLowerCase());
               const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
               const hasNeedsLabel = labels.includes(DEFAULT_LABEL);
 
