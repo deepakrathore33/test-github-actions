@@ -27,6 +27,12 @@ jobs:
           script: |
             const issue = context.payload.issue;
 
+            // Check if the issue object exists
+            if (!issue) {
+              console.log("No issue context available. Exiting.");
+              return; // Exit if issue context is not available
+            }
+
             // Log existing labels for debugging
             console.log("Existing labels:", issue.labels.map(label => label.name));
 
