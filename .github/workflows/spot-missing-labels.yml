@@ -22,7 +22,7 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            const AREA_LABEL_PREFIX = 'area-';
+            const AREA_LABEL_PREFIX = 'Area-';
             const DEFAULT_LABEL = 'needs-area-label';
 
             const issues = await github.paginate(github.rest.issues.listForRepo, {
