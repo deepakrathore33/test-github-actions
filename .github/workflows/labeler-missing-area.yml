@@ -27,6 +27,9 @@ jobs:
           script: |
             const issue = context.payload.issue;
 
+            // Log existing labels for debugging
+            console.log("Existing labels:", issue.labels.map(label => label.name));
+
             // Skip if the issue already has an 'area-*' label
             const hasAreaLabel = issue.labels.some(label => label.name.startsWith('area-'));
             if (hasAreaLabel) {
