@@ -2,7 +2,6 @@ name: "Spot Issues Missing Area Labels"
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: '0 13 * * *'
 
@@ -37,7 +36,8 @@ jobs:
               // Skip pull requests
               if (issue.pull_request) continue;
 
-              const labels = (issue.labels || []).map(label => (label.name || '').toLowerCase());
+              // Ensure labels property exists and is an array
+              const labels = Array.isArray(issue.labels) ? issue.labels.map(label => label.name.toLowerCase()) : [];
               const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
               const hasNeedsLabel = labels.includes(DEFAULT_LABEL);
 
