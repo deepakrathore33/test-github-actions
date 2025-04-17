@@ -1,36 +1,54 @@
-name: "Spot Issues Missing Labels or Assignments"
+name: "Spot Issues Missing Area Labels"
+
 on:
-  workflow_dispatch: 
+  # Allow manual run
+  workflow_dispatch:
+
+  # Scheduled run daily at 13:00 UTC
+  schedule:
+    - cron: '0 13 * * *'
 
 permissions:
-  issues: read
+  issues: write  # Needed to add labels to issues
   contents: read
 
 jobs:
-  check-issues:
+  check-area-labels:
+    name: "Check Issues Missing Area Labels"
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Check for issues without labels or assignees
+      - name: Add 'needs-area-label' to Issues Missing Area Labels
         uses: actions/github-script@v6
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const AREA_LABEL_PREFIX = 'area-';
+            const DEFAULT_LABEL = 'needs-area-label';
+
             const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
             });
 
-            const noLabelsOrAssignees = issues.filter(issue => {
-              const hasUntriagedLabel = issue.labels.some(label => label.name === 'untriaged');
-              const hasAreaCompilersLabel = issue.labels.some(label => label.name === 'Area-Compilers');
-              const hasOtherLabels = issue.labels.length > 1 || (issue.labels.length === 1 && !hasUntriagedLabel);
-              return hasUntriagedLabel && !hasAreaCompilersLabel && !issue.assignee && !hasOtherLabels;
-            });
+            for (const issue of issues) {
+              // Skip pull requests
+              if (issue.pull_request) continue;
 
-            for (const issue of noLabelsOrAssignees) {
-              console.log(`Issue #${issue.number} is missing labels apart from "untriaged" or is not assigned.`);
+              const labels = issue.labels.map(label => label.name.toLowerCase());
+              const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
+              const hasNeedsLabel = labels.includes(DEFAULT_LABEL);
+
+              if (!hasAreaLabel && !hasNeedsLabel) {
+                console.log(`Adding '${DEFAULT_LABEL}' to issue #${issue.number}`);
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: [DEFAULT_LABEL],
+                });
+              }
             }
