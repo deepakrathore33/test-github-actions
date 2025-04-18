@@ -1,11 +1,9 @@
 name: "Spot Issues Missing Area Labels"
 
 on:
-  issues:
-    types: [opened, edited, labeled, unlabeled]
   workflow_dispatch:
   schedule:
-    - cron: '0 13 * * *'
+    - cron: '0 13 * * *' # Runs daily at 13:00 UTC
 
 permissions:
   issues: write
@@ -16,55 +14,61 @@ jobs:
     name: "Check Issues Missing Area Labels"
     runs-on: ubuntu-latest
 
+    if: github.repository == 'dotnet/roslyn' || github.repository == deepakrathore33/test-github-actions # Skip forks
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Add 'needs-area-label' to Issues Missing Area Labels
+      - name: Tag Issues Missing Area Labels
         uses: actions/github-script@v6
         with:
           script: |
             const AREA_LABEL_PREFIX = 'Area-';
-            const DEFAULT_LABEL = 'needs-area-label';
+            const NEEDS_AREA_LABEL = 'needs_area_label';
+            const COMMENT_BODY = "⚠️ This issue is missing an Area label. Please triage it by adding the appropriate `Area-*` label.";
 
-            const issues = await github.paginate(github.rest.issues.listForRepo, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100,
-            });
+            // Fetch open issues in the repo
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100,
+              }
+            );
 
-            const noLabelsOrAssignees = issues.filter(issue => {
-              const hasUntriagedLabel = issue.labels.some(label => label.name === 'untriaged');
-              const hasAreaCompilersLabel = issue.labels.some(label => label.name === 'Area-Compilers');
-              return hasUntriagedLabel && !hasAreaCompilersLabel && !issue.assignee;
-            });
-
-            for (const issue of noLabelsOrAssignees) {
+            for (const issue of issues) {
               // Skip pull requests
               if (issue.pull_request) continue;
 
-              // Ensure labels property exists and is an array
-              const labels = issue.labels || [];
-              const hasAreaLabel = labels.some(label => label.name.startsWith(AREA_LABEL_PREFIX));
-              const hasNeedsLabel = labels.includes(DEFAULT_LABEL);
+              // Skip issues that already have a needs_area_label
+              if (issue.labels.some(label => label.name === NEEDS_AREA_LABEL)) continue;
 
-              if (hasNeedsLabel && hasAreaLabel) {
-                console.log(`Removing '${DEFAULT_LABEL}' from issue #${issue.number}`);
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issue.number,
-                  name: DEFAULT_LABEL,
-                });
-              }
-              if (!hasAreaLabel && !hasNeedsLabel) {
-                console.log(`Adding '${DEFAULT_LABEL}' to issue #${issue.number}`);
+              const labels = issue.labels.map(label => label.name);
+              const hasUntriaged = labels.includes('untriaged');
+              const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
+              const hasAssignee = issue.assignee !== null;
+
+              // If issue needs an Area label
+              if (hasUntriaged && !hasAreaLabel && !hasAssignee) {
+                console.log(`Adding '${NEEDS_AREA_LABEL}' to issue #${issue.number}`);
+
+                // Add the needs_area_label
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: issue.number,
-                  labels: [DEFAULT_LABEL],
+                  labels: [NEEDS_AREA_LABEL],
+                });
+
+                // Leave a helpful comment
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: COMMENT_BODY,
                 });
               }
             }
