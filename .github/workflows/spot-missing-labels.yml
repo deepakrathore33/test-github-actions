@@ -44,7 +44,7 @@ jobs:
 
               // Ensure labels property exists and is an array
               const labels = issue.labels || [];
-              const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
+              const hasAreaLabel = labels.some(label => label.name.startsWith(AREA_LABEL_PREFIX));
               const hasNeedsLabel = labels.includes(DEFAULT_LABEL);
 
               if (!hasAreaLabel && !hasNeedsLabel) {
