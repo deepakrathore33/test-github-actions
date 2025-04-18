@@ -1,6 +1,8 @@
 name: "Spot Issues Missing Area Labels"
 
 on:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
   workflow_dispatch:
   schedule:
     - cron: '0 13 * * *'
