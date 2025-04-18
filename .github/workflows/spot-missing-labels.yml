@@ -32,12 +32,18 @@ jobs:
               per_page: 100,
             });
 
-            for (const issue of issues) {
+            const noLabelsOrAssignees = issues.filter(issue => {
+              const hasUntriagedLabel = issue.labels.some(label => label.name === 'untriaged');
+              const hasAreaCompilersLabel = issue.labels.some(label => label.name === 'Area-Compilers');
+              return hasUntriagedLabel && !hasAreaCompilersLabel && !issue.assignee;
+            });
+
+            for (const issue of noLabelsOrAssignees) {
               // Skip pull requests
               if (issue.pull_request) continue;
 
               // Ensure labels property exists and is an array
-              const labels = Array.isArray(issue.labels) ? issue.labels.map(label => label.name.toLowerCase()) : [];
+              const labels = issue.labels || [];
               const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
               const hasNeedsLabel = labels.includes(DEFAULT_LABEL);
 
