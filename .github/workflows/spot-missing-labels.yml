@@ -14,7 +14,7 @@ jobs:
     name: "Check Issues Missing Area Labels"
     runs-on: ubuntu-latest
 
-    if: github.repository == 'dotnet/roslyn' || github.repository == 'deepakrathore33/test-github-actions' # Skip forks
+    if: github.repository == 'dotnet/roslyn' # Skip forks
 
     steps:
       - name: Checkout Repository
@@ -43,16 +43,14 @@ jobs:
               // Skip pull requests
               if (issue.pull_request) continue;
 
-              // Skip issues that already have a needs_area_label
-              if (issue.labels.some(label => label.name === NEEDS_AREA_LABEL)) continue;
-
               const labels = issue.labels.map(label => label.name);
               const hasUntriaged = labels.includes('untriaged');
               const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
+              const hasNeedsAreaLabel = labels.includes(NEEDS_AREA_LABEL);
               const hasAssignee = issue.assignee !== null;
 
               // If issue needs an Area label
-              if (hasUntriaged && !hasAreaLabel && !hasAssignee) {
+              if (hasUntriaged && !hasAreaLabel && !hasNeedsAreaLabel && !hasAssignee) {
                 console.log(`Adding '${NEEDS_AREA_LABEL}' to issue #${issue.number}`);
 
                 // Add the needs_area_label
