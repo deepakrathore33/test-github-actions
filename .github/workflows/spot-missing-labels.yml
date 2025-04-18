@@ -14,7 +14,7 @@ jobs:
     name: "Check Issues Missing Area Labels"
     runs-on: ubuntu-latest
 
-    if: github.repository == 'dotnet/roslyn' || github.repository == deepakrathore33/test-github-actions # Skip forks
+    if: github.repository == 'dotnet/roslyn' || github.repository == 'deepakrathore33/test-github-actions' # Skip forks
 
     steps:
       - name: Checkout Repository
