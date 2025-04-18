@@ -49,6 +49,15 @@ jobs:
               const hasAreaLabel = labels.some(label => label.name.startsWith(AREA_LABEL_PREFIX));
               const hasNeedsLabel = labels.includes(DEFAULT_LABEL);
 
+              if (hasNeedsLabel && hasAreaLabel) {
+                console.log(`Removing '${DEFAULT_LABEL}' from issue #${issue.number}`);
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: DEFAULT_LABEL,
+                });
+              }
               if (!hasAreaLabel && !hasNeedsLabel) {
                 console.log(`Adding '${DEFAULT_LABEL}' to issue #${issue.number}`);
                 await github.rest.issues.addLabels({
