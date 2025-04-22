@@ -21,7 +21,6 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const AREA_LABEL_PREFIX = 'Area-';
             const NEEDS_AREA_LABEL = 'needs-area-label';
 
             // Fetch open issues in the repo
@@ -40,7 +39,7 @@ jobs:
               if (issue.pull_request) continue;
 
               const labels = issue.labels.map(label => label.name);
-              const hasAreaLabel = labels.some(name => name.startsWith(AREA_LABEL_PREFIX));
+              const hasAreaLabel = labels.some(name => name.startsWith('Area-') || name.startsWith('Interactive-'));
               const hasNeedsAreaLabel = labels.includes(NEEDS_AREA_LABEL);
 
               // If issue needs an Area label
