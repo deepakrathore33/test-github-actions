@@ -24,7 +24,7 @@ jobs:
             const OWNER = context.repo.owner;
             const REPO = context.repo.repo;
             const LABEL_FILTER = 'collecting-feedback';
-            const UPVOTE_THRESHOLD = 5;
+            const UPVOTE_THRESHOLD = 0;
             const AGE_THRESHOLD_DAYS = 1;
 
             const now = new Date();
