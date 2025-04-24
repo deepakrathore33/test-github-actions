@@ -25,7 +25,7 @@ jobs:
             const REPO = context.repo.repo;
             const LABEL_FILTER = 'collecting-feedback';
             const UPVOTE_THRESHOLD = 5;
-            const AGE_THRESHOLD_DAYS = 180;
+            const AGE_THRESHOLD_DAYS = 1;
 
             const now = new Date();
 
@@ -42,6 +42,7 @@ jobs:
               const ageInDays = (now - createdAt) / (1000 * 60 * 60 * 24);
 
               if (upvotes > UPVOTE_THRESHOLD) {
+                console.log(`Promoting Issue #${issue.number} to 'untriaged'`);
                 await github.rest.issues.addLabels({
                   owner: OWNER,
                   repo: REPO,
@@ -52,6 +53,7 @@ jobs:
                 // Post a canned response before closing
                 const cannedMessage = `This issue has been closed because it remained in the \`collecting-feedback\` state for more than 6 months without receiving sufficient upvotes. If you're still experiencing this problem, please try to reproduce it on the latest version of the product. If it persists, feel free to open a new issue with updated reproduction details. Thank you for your feedback and help in improving the product!`.trim();
 
+                console.log(`Closing stale Issue #${issue.number}`);
                 await github.rest.issues.createComment({
                   owner: OWNER,
                   repo: REPO,
