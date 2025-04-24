@@ -29,7 +29,7 @@ jobs:
 
             const now = new Date();
 
-            const issues = await github.paginate(github.issues.listForRepo, {
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner: OWNER,
               repo: REPO,
               state: 'open',
