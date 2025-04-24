@@ -1,0 +1,60 @@
+name: "Labeler: Collecting Feedback"
+
+on:
+  schedule:
+    - cron: '0 13 * * *' # Runs daily at 13:00 UTC
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  manage-feedback-issues:
+    name: "Manage Issues with 'collecting-feedback' Label"
+    runs-on: ubuntu-latest
+
+    if: github.repository == 'dotnet/roslyn' || github.repository == 'deepakrathore33/test-github-actions'
+
+    steps:
+      - name: Analyze and Manage Feedback Issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const OWNER = context.repo.owner;
+            const REPO = context.repo.repo;
+            const LABEL_FILTER = 'collecting-feedback';
+            const UPVOTE_THRESHOLD = 5;
+            const AGE_THRESHOLD_DAYS = 180;
+
+            const now = new Date();
+
+            const issues = await github.paginate(github.issues.listForRepo, {
+              owner: OWNER,
+              repo: REPO,
+              state: 'open',
+              labels: LABEL_FILTER
+            });
+
+            for (const issue of issues) {
+              const upvotes = issue.reactions['+1'];
+              const createdAt = new Date(issue.created_at);
+              const ageInDays = (now - createdAt) / (1000 * 60 * 10);
+
+              if (upvotes > UPVOTE_THRESHOLD) {
+                await github.issues.update({
+                  owner: OWNER,
+                  repo: REPO,
+                  issue_number: issue.number,
+                  labels: ['untriaged']
+                });
+              } else if (ageInDays > AGE_THRESHOLD_DAYS) {
+                await github.issues.update({
+                  owner: OWNER,
+                  repo: REPO,
+                  issue_number: issue.number,
+                  state: 'closed'
+                });
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
