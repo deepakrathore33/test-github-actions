@@ -42,14 +42,14 @@ jobs:
               const ageInDays = (now - createdAt) / (1000 * 60 * 10);
 
               if (upvotes > UPVOTE_THRESHOLD) {
-                await github.issues.update({
+                await github.rest.issues.addLabels({
                   owner: OWNER,
                   repo: REPO,
                   issue_number: issue.number,
                   labels: ['untriaged']
                 });
               } else if (ageInDays > AGE_THRESHOLD_DAYS) {
-                await github.issues.update({
+                await github.rest.issues.update({
                   owner: OWNER,
                   repo: REPO,
                   issue_number: issue.number,
