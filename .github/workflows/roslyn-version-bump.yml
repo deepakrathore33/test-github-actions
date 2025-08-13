@@ -15,16 +15,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Uninstall Microsoft.RoslynTools
+
+      - name: Install Microsoft.RoslynTools locally
         run: |
-          dotnet tool uninstall Microsoft.RoslynTools --global
-      - name: Install Microsoft.RoslynTools
-        run: |
-          dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
 
       - name: Run pr-finder
         run: |
-            roslyn-tools pr-finder -h
+          dotnet tool run roslyn-tools pr-finder -h
 
 
     #   - name: Update CHANGELOG.md
