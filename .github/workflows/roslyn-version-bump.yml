@@ -15,9 +15,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install Microsoft.RoslynTools globally
+      - name: Install Microsoft.RoslynTools
         run: |
-          dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
 
       - name: Load last Roslyn SHA
         id: load_sha
@@ -50,7 +50,7 @@ jobs:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
         run: |
-          roslyn-tools pr-finder \
+            roslyn-tools pr-finder \
             -s $LAST_SHA \
             -e $LATEST_SHA \
             --label changelog-worthy \
