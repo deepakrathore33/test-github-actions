@@ -1,0 +1,87 @@
+name: Daily Roslyn Version Bump
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bump-roslyn:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dotnet tools
+      run: dotnet tool restore
+
+    - name: Load last Roslyn SHA
+      id: load_sha
+      run: |
+        echo "LAST_SHA=$(cat .github/roslyn-last-sha.txt)" >> $GITHUB_ENV
+
+    - name: Get latest Roslyn SHA
+      run: |
+        git clone https://github.com/dotnet/roslyn.git roslyn-temp
+        cd roslyn-temp
+        echo "LATEST_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Compare SHAs
+      if: env.LAST_SHA == env.LATEST_SHA
+      run: echo "No new Roslyn commits. Skipping update."
+
+    - name: Run pr-finder
+      if: env.LAST_SHA != env.LATEST_SHA
+      run: |
+        dotnet roslyn-tools pr-finder \
+          -s $LAST_SHA \
+          -e $LATEST_SHA \
+          --label changelog-worthy \
+          --format changelog > changelog.txt
+
+    - name: Update CHANGELOG.md
+      if: env.LAST_SHA != env.LATEST_SHA
+      run: |
+        echo "* Bump Roslyn to $LATEST_SHA" > header.txt
+        cat header.txt changelog.txt CHANGELOG.md > updated.md
+        mv updated.md CHANGELOG.md
+
+    - name: Update package.json
+      if: env.LAST_SHA != env.LATEST_SHA
+      run: |
+        jq --arg sha "$LATEST_SHA" '.defaults.roslyn = $sha' package.json > tmp.json && mv tmp.json package.json
+
+    - name: Run CI validation
+      if: env.LAST_SHA != env.LATEST_SHA
+      run: |
+        # Replace with your actual test command
+        npm install
+        npm test
+
+    - name: Commit changes
+      if: env.LAST_SHA != env.LATEST_SHA
+      run: |
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+        git checkout -b roslyn-auto-update
+        git add CHANGELOG.md package.json
+        git commit -m "Automated Roslyn version bump to $LATEST_SHA"
+
+    - name: Create Pull Request
+      if: env.LAST_SHA != env.LATEST_SHA
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        title: "Daily Roslyn Version Bump"
+        body: |
+          This PR updates the Roslyn version to `$LATEST_SHA` and includes changelog entries from PRs labeled `changelog-worthy`.
+        branch: roslyn-auto-update
+        commit-message: "Automated Roslyn version bump to $LATEST_SHA"
+
+    - name: Save latest SHA
+      if: env.LAST_SHA != env.LATEST_SHA
+      run: echo "$LATEST_SHA" > .github/roslyn-last-sha.txt
