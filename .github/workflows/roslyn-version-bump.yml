@@ -17,8 +17,8 @@ jobs:
 
       - name: Install Microsoft.RoslynTools
         run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./tools
-          echo "$GITHUB_WORKSPACE/tools" >> $GITHUB_PATH
+          dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
+          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
 
       - name: Load last Roslyn SHA
         id: load_sha
