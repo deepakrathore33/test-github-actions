@@ -11,18 +11,28 @@ jobs:
     - name: Checkout repo
       uses: actions/checkout@v3
 
+
     - name: Setup .NET SDK
       uses: actions/setup-dotnet@v3
       with:
         dotnet-version: '8.0.x'
 
+
     - name: Restore dotnet tools
       run: dotnet tool restore
+
+    - name: Ensure Microsoft.RoslynTools is installed
+      run: |
+        dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
 
     - name: Load last Roslyn SHA
       id: load_sha
       run: |
-        echo "LAST_SHA=$(cat .github/roslyn-last-sha.txt)" >> $GITHUB_ENV
+        if [ -f .github/roslyn-last-sha.txt ]; then
+          echo "LAST_SHA=$(cat .github/roslyn-last-sha.txt)" >> $GITHUB_ENV
+        else
+          echo "LAST_SHA=0000000000000000000000000000000000000000" >> $GITHUB_ENV
+        fi
 
     - name: Get latest Roslyn SHA
       run: |
@@ -31,13 +41,13 @@ jobs:
         echo "LATEST_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
     - name: Compare SHAs
-      if: env.LAST_SHA == env.LATEST_SHA
+      if: ${{ env.LAST_SHA == env.LATEST_SHA }}
       run: echo "No new Roslyn commits. Skipping update."
 
     - name: Run pr-finder
-      if: env.LAST_SHA != env.LATEST_SHA
+      if: ${{ env.LAST_SHA != env.LATEST_SHA }}
       run: |
-        dotnet roslyn-tools pr-finder \
+        ./.config/dotnet-tools/roslyn-tools pr-finder \
           -s $LAST_SHA \
           -e $LATEST_SHA \
           --label changelog-worthy \
