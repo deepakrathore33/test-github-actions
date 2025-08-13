@@ -50,7 +50,7 @@ jobs:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
         run: |
-          dotnet tool run roslyn-tools pr-finder -s 1755482 -e 9b9dff1--format changelog 
+          dotnet tool run roslyn-tools pr-finder -s 1755482 -e 9b9dff1 --format changelog 
 
       - name: Update CHANGELOG.md
         if: steps.check_update.outputs.update_needed == 'true'
