@@ -44,7 +44,7 @@ jobs:
 
       - name: Install Microsoft.RoslynTools
         run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json 
 
       - name: Run pr-finder
         if: steps.check_update.outputs.update_needed == 'true'
