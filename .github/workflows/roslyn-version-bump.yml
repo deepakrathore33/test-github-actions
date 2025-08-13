@@ -15,62 +15,15 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-
-      - name: Install Microsoft.RoslynTools locally
+      - name: Install Microsoft.RoslynTools
         run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
+            dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
+
+     
 
       - name: Run pr-finder
         run: |
-          dotnet tool run roslyn-tools pr-finder -h
+            dotnet tool run roslyn-tools pr-finder -h
 
 
-    #   - name: Update CHANGELOG.md
-    #     if: steps.check_update.outputs.update_needed == 'true'
-    #     env:
-    #       LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-    #     run: |
-    #       echo "* Bump Roslyn to $LATEST_SHA" > header.txt
-    #       cat header.txt changelog.txt CHANGELOG.md > updated.md
-    #       mv updated.md CHANGELOG.md
-
-    #   - name: Update package.json
-    #     if: steps.check_update.outputs.update_needed == 'true'
-    #     env:
-    #       LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-    #     run: |
-    #       jq --arg sha "$LATEST_SHA" '.defaults.roslyn = $sha' package.json > tmp.json && mv tmp.json package.json
-
-    #   - name: Run CI validation
-    #     if: steps.check_update.outputs.update_needed == 'true'
-    #     run: |
-    #       npm install
-    #       npm test
-
-    #   - name: Commit changes
-    #     if: steps.check_update.outputs.update_needed == 'true'
-    #     env:
-    #       LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-    #     run: |
-    #       git config user.name "github-actions"
-    #       git config user.email "github-actions@github.com"
-    #       git checkout -b roslyn-auto-update
-    #       git add CHANGELOG.md package.json
-    #       git commit -m "Automated Roslyn version bump to $LATEST_SHA"
-
-    #   - name: Create Pull Request
-    #     if: steps.check_update.outputs.update_needed == 'true'
-    #     uses: peter-evans/create-pull-request@v5
-    #     with:
-    #       token: ${{ secrets.GITHUB_TOKEN }}
-    #       title: "Automated Roslyn Version Bump"
-    #       body: |
-    #         This PR updates the Roslyn version to `${{ steps.get_latest_sha.outputs.latest_sha }}` and includes changelog entries from PRs labeled `changelog-worthy`.
-    #       branch: roslyn-auto-update
-    #       commit-message: "Automated Roslyn version bump to ${{ steps.get_latest_sha.outputs.latest_sha }}"
-
-    #   - name: Save latest SHA
-    #     if: steps.check_update.outputs.update_needed == 'true'
-    #     env:
-    #       LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-    #     run: echo "$LATEST_SHA" > .github/roslyn-last-sha.txt
+      
