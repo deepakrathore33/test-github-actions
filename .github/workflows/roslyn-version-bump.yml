@@ -15,7 +15,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      
+      - name: Install Microsoft.RoslynTools
+        run: |
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
 
       - name: Load last Roslyn SHA
         id: load_sha
@@ -42,17 +44,18 @@ jobs:
             echo "update_needed=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install Microsoft.RoslynTools
-        run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json 
-
       - name: Run pr-finder
         if: steps.check_update.outputs.update_needed == 'true'
         env:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
+        working-directory: ${{ github.workspace }}
         run: |
-          dotnet tool run roslyn-tools pr-finder -s 1755482 -e 9b9dff1 --format changelog 
+          dotnet tool run roslyn-tools pr-finder \
+            -s $LAST_SHA \
+            -e $LATEST_SHA \
+            --label changelog-worthy \
+            --format changelog > changelog.txt
 
       - name: Update CHANGELOG.md
         if: steps.check_update.outputs.update_needed == 'true'
