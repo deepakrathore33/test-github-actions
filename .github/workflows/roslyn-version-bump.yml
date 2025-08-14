@@ -145,6 +145,8 @@ jobs:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
           INSTALL_MODE: ${{ steps.install_tool.outputs.mode }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "Install mode: ${INSTALL_MODE:-unknown}"
@@ -161,12 +163,34 @@ jobs:
             exit 1
           fi
           echo "Using TOOL_CMD=$TOOL_CMD"
+          $TOOL_CMD --version || true
+          $TOOL_CMD --help 2>/dev/null | head -n 20 || true
+
+          if [ "$LAST_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "First run detected; generating placeholder changelog." >&2
+            echo "(Initial run – no previous SHA to diff)" > changelog.txt
+          else
+            if [ ! -d roslyn-temp ]; then echo "roslyn-temp directory missing" >&2; exit 1; fi
+            pushd roslyn-temp
+            echo "Running pr-finder between $LAST_SHA and $LATEST_SHA in $(pwd)"
+            set +e
+            $TOOL_CMD pr-finder \
+              -s "$LAST_SHA" \
+              -e "$LATEST_SHA" \
+              --label changelog-worthy \
+              --format changelog > ../changelog.txt 2>../pr-finder.stderr
+            EXIT_CODE=$?
+            set -e
+            popd
+            if [ $EXIT_CODE -ne 0 ]; then
+              echo "pr-finder failed with exit code $EXIT_CODE" >&2
+              echo "--- stderr ---" >&2
+              cat pr-finder.stderr >&2 || true
+              echo "(pr-finder failed; placeholder changelog)" > changelog.txt
+            fi
+          fi
           ls -l "$TOOL_CMD" 2>/dev/null || true
-          $TOOL_CMD pr-finder \
-            -s "$LAST_SHA" \
-            -e "$LATEST_SHA" \
-            --label changelog-worthy \
-            --format changelog > changelog.txt
+          echo "Changelog preview:"; head -n 40 changelog.txt || true
 
       - name: Update CHANGELOG.md
         if: steps.check_update.outputs.update_needed == 'true'
