@@ -2,9 +2,16 @@ name: Automated Roslyn Version Bump
 
 on:
   workflow_dispatch:
+    inputs:
+      toolVersion:
+        description: 'Microsoft.RoslynTools version to use (leave blank for latest prerelease)'
+        required: false
+        type: string
 jobs:
   bump-roslyn:
     runs-on: ubuntu-latest
+    env:
+      TOOL_VERSION: ${{ inputs.toolVersion }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -14,17 +21,51 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install Microsoft.RoslynTools locally
+      - name: .NET environment diagnostics
         run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
+          dotnet --info || true
+          echo "Initial global tool list:" 
+          dotnet tool list -g || true
+          echo "Workspace root: $(pwd)"
+
+      - name: Install Microsoft.RoslynTools (attempt global then local) 
+        id: install_tool
+        run: |
+          set -euo pipefail
+          echo "Requested TOOL_VERSION: '${TOOL_VERSION:-}'"
+          VERSION_ARG="--prerelease"
+          if [ -n "${TOOL_VERSION:-}" ]; then VERSION_ARG="--version ${TOOL_VERSION}"; fi
+          echo "Using VERSION_ARG=$VERSION_ARG"
+          echo "Uninstalling any existing global tool (ignore errors)"
+          dotnet tool uninstall -g Microsoft.RoslynTools || true
+          echo "Attempting global install..."
+          if dotnet tool install -g Microsoft.RoslynTools $VERSION_ARG --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json; then
+            echo "Global install succeeded." 
+            echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+            echo "mode=global" >> "$GITHUB_OUTPUT"
+            echo "Global tools list after install:" 
+            dotnet tool list -g || true
+            which roslyn-tools || true
+          else
+            echo "Global install FAILED. Falling back to local --tool-path install." >&2
+            rm -rf .config/dotnet-tools
+            mkdir -p .config/dotnet-tools
+            if dotnet tool install Microsoft.RoslynTools $VERSION_ARG --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools; then
+              echo "Local install succeeded." 
+              echo "mode=local" >> "$GITHUB_OUTPUT"
+              ls -l .config/dotnet-tools || true
+            else
+              echo "Both global and local installs FAILED. Exiting." >&2
+              exit 1
+            fi
+          fi
+          echo "Installation step complete. Mode: $(grep mode= "$GITHUB_OUTPUT" || true)"
 
       - name: Log directory structure after tool install
         run: |
-          echo "Root directory after tool install:"
-          pwd
-          ls -l
-          echo ".config/dotnet-tools directory:"
-          ls -l .config/dotnet-tools
+          echo "Root directory after tool install:"; pwd; ls -l
+          echo "Home dotnet tools dir:"; ls -l "$HOME/.dotnet/tools" 2>/dev/null || echo "(no global tools dir)"
+          echo ".config/dotnet-tools dir:"; ls -l .config/dotnet-tools 2>/dev/null || echo "(no local tool-path dir)"
 
       - name: Load last Roslyn SHA
         id: load_sha
@@ -72,10 +113,20 @@ jobs:
         env:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
+          INSTALL_MODE: ${{ steps.install_tool.outputs.mode }}
         run: |
-          ./.config/dotnet-tools/dotnet-roslyn-tools pr-finder \
-            -s $LAST_SHA \
-            -e $LATEST_SHA \
+          set -euo pipefail
+          echo "Install mode: ${INSTALL_MODE:-unknown}"
+          if [ "${INSTALL_MODE:-}" = "global" ]; then
+            TOOL_CMD="roslyn-tools"
+          else
+            TOOL_CMD="./.config/dotnet-tools/dotnet-roslyn-tools"
+          fi
+          echo "Using TOOL_CMD=$TOOL_CMD"
+          ls -l "$TOOL_CMD" 2>/dev/null || true
+          $TOOL_CMD pr-finder \
+            -s "$LAST_SHA" \
+            -e "$LATEST_SHA" \
             --label changelog-worthy \
             --format changelog > changelog.txt
 
