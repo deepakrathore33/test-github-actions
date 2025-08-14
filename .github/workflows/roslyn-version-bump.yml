@@ -38,28 +38,55 @@ jobs:
           echo "Using VERSION_ARG=$VERSION_ARG"
           echo "Uninstalling any existing global tool (ignore errors)"
           dotnet tool uninstall -g Microsoft.RoslynTools || true
+          FEED_URL="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
+          echo "Feed URL: $FEED_URL"
           echo "Attempting global install..."
-          if dotnet tool install -g Microsoft.RoslynTools $VERSION_ARG --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json; then
+          if dotnet tool install -g Microsoft.RoslynTools $VERSION_ARG --add-source "$FEED_URL"; then
             echo "Global install succeeded." 
             echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
             echo "mode=global" >> "$GITHUB_OUTPUT"
-            echo "Global tools list after install:" 
             dotnet tool list -g || true
             which roslyn-tools || true
           else
-            echo "Global install FAILED. Falling back to local --tool-path install." >&2
+            echo "Global install FAILED. Attempting local --tool-path install." >&2
             rm -rf .config/dotnet-tools
             mkdir -p .config/dotnet-tools
-            if dotnet tool install Microsoft.RoslynTools $VERSION_ARG --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools; then
-              echo "Local install succeeded." 
+            if dotnet tool install Microsoft.RoslynTools $VERSION_ARG --add-source "$FEED_URL" --tool-path ./.config/dotnet-tools; then
+              echo "Local tool-path install succeeded." 
               echo "mode=local" >> "$GITHUB_OUTPUT"
               ls -l .config/dotnet-tools || true
             else
-              echo "Both global and local installs FAILED. Exiting." >&2
-              exit 1
+              echo "Feed installs FAILED. Falling back to SOURCE BUILD of roslyn-tools repository." >&2
+              SRC_DIR="roslyn-tools-src"
+              rm -rf "$SRC_DIR"
+              git clone --depth 1 https://github.com/dotnet/roslyn-tools.git "$SRC_DIR"
+              echo "Cloned roslyn-tools. Contents:"; ls -1 "$SRC_DIR" || true
+              pushd "$SRC_DIR"
+              echo "Packing dotnet-roslyn-tools project (Release)..."
+              if dotnet pack src/dotnet-roslyn-tools -c Release -o out; then
+                ls -l out || true
+                PKG_PATH=$(ls out/Microsoft.RoslynTools.*.nupkg 2>/dev/null | head -n1 || true)
+                if [ -z "${PKG_PATH}" ]; then
+                  echo "No nupkg produced; aborting." >&2; popd; exit 1
+                fi
+                BUILT_VER=$(echo "${PKG_PATH}" | sed -E 's/.*Microsoft\.RoslynTools\.([0-9A-Za-z.-]+)\.nupkg/\1/')
+                echo "Built package version: ${BUILT_VER}"
+                popd
+                rm -rf .config/dotnet-tools
+                mkdir -p .config/dotnet-tools
+                if dotnet tool install Microsoft.RoslynTools --version "${BUILT_VER}" --add-source "${SRC_DIR}/out" --tool-path ./.config/dotnet-tools; then
+                  echo "Installed from source-built package version ${BUILT_VER}." 
+                  echo "mode=local-source" >> "$GITHUB_OUTPUT"
+                  ls -l .config/dotnet-tools || true
+                else
+                  echo "Failed to install from source-built package." >&2; exit 1
+                fi
+              else
+                echo "dotnet pack failed; aborting." >&2; popd || true; exit 1
+              fi
             fi
           fi
-          echo "Installation step complete. Mode: $(grep mode= "$GITHUB_OUTPUT" || true)"
+          echo "Installation step complete. Mode: $(grep mode= \"$GITHUB_OUTPUT\" || true)"
 
       - name: Log directory structure after tool install
         run: |
