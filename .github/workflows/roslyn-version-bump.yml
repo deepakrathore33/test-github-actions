@@ -1,4 +1,3 @@
-
 name: Automated Roslyn Version Bump
 
 on:
@@ -16,12 +15,14 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Setup .NET local tool manifest
+        working-directory: .config
         run: |
-          if [ ! -f .config/dotnet-tools.json ]; then
-            dotnet new tool-manifest --output .config
+          if [ ! -f dotnet-tools.json ]; then
+            dotnet new tool-manifest
           fi
 
       - name: Install Microsoft.RoslynTools
+        working-directory: .config
         run: |
           dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
 
@@ -55,12 +56,13 @@ jobs:
         env:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
+        working-directory: .config
         run: |
           dotnet tool run roslyn-tools pr-finder \
             -s $LAST_SHA \
             -e $LATEST_SHA \
             --label changelog-worthy \
-            --format changelog > changelog.txt
+            --format changelog > ../changelog.txt
 
       - name: Update CHANGELOG.md
         if: steps.check_update.outputs.update_needed == 'true'
