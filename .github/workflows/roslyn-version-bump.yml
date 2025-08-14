@@ -27,6 +27,31 @@ jobs:
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
           roslyn-tools --version
 
+      - name: Authenticate roslyn-tools
+        env:
+          # Provide the same token under multiple var names to satisfy tool expectations
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROSLYNTOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROSLYN_TOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Attempting roslyn-tools authenticate (non-fatal if it fails)."
+          if roslyn-tools authenticate --help 2>/dev/null | grep -qi github; then
+            # Try common flag patterns (ignore failures)
+            roslyn-tools authenticate --github-token "$GITHUB_TOKEN" --ci 2>&1 || true
+            roslyn-tools authenticate --github "$GITHUB_TOKEN" 2>&1 || true
+          else
+            echo "authenticate command help did not mention github; proceeding anyway." || true
+          fi
+          # Show any settings produced
+          if [ -d "$HOME/.roslyn-tools" ]; then
+            echo "Contents of ~/.roslyn-tools:"; ls -R "$HOME/.roslyn-tools" || true
+          else
+            echo "No ~/.roslyn-tools directory created." || true
+          fi
+
       - name: Determine commit range
         id: range
         run: |
@@ -53,6 +78,9 @@ jobs:
           END: ${{ steps.range.outputs.end_sha }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROSLYNTOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROSLYN_TOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "Finding PRs between $START and $END"
