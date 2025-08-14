@@ -15,9 +15,15 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Setup .NET local tool manifest
+        run: |
+          if [ ! -f .config/dotnet-tools.json ]; then
+            dotnet new tool-manifest --output .config
+          fi
+
       - name: Install Microsoft.RoslynTools
         run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
 
       - name: Load last Roslyn SHA
         id: load_sha
@@ -49,7 +55,6 @@ jobs:
         env:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-        working-directory: ${{ github.workspace }}
         run: |
           dotnet tool run roslyn-tools pr-finder \
             -s $LAST_SHA \
