@@ -47,6 +47,24 @@ jobs:
           echo "start_sha=$START" >> $GITHUB_OUTPUT
           echo "end_sha=$END" >> $GITHUB_OUTPUT
 
+      - name: Write roslyn-tools settings (GitHub token)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SETTINGS_DIR="$HOME/.roslyn-tools"
+          mkdir -p "$SETTINGS_DIR"
+          # Create JSON with GitHubToken only; other tokens blank
+          JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "$GITHUB_TOKEN")
+          ENCODED=$(printf '%s' "$JSON" | base64 -w0 2>/dev/null || printf '%s' "$JSON" | base64)
+          printf '%s' "$ENCODED" > "$SETTINGS_DIR/settings"
+          echo "Wrote settings file: $SETTINGS_DIR/settings"
+          echo "(Length: $(wc -c < "$SETTINGS_DIR/settings"))"
+          # Do a quick decode sanity check (not printing secret value)
+          head -c 10 "$SETTINGS_DIR/settings" || true
+          # List directory contents (file should be present)
+          ls -l "$SETTINGS_DIR" || true
+
       - name: Run pr-finder
         env:
           START: ${{ steps.range.outputs.start_sha }}
