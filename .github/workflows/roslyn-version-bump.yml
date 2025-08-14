@@ -14,17 +14,17 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Setup .NET local tool manifest
-        working-directory: .config
-        run: |
-          if [ ! -f dotnet-tools.json ]; then
-            dotnet new tool-manifest
-          fi
-
       - name: Install Microsoft.RoslynTools
-        working-directory: .config
         run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
+
+      - name: Log directory structure after tool install
+        run: |
+          echo "Root directory after tool install:"
+          pwd
+          ls -l
+          echo ".config/dotnet-tools directory:"
+          ls -l .config/dotnet-tools
 
       - name: Load last Roslyn SHA
         id: load_sha
@@ -39,6 +39,11 @@ jobs:
         id: get_latest_sha
         run: |
           git clone --depth 1 https://github.com/dotnet/roslyn.git roslyn-temp
+          echo "Root directory after git clone:"
+          pwd
+          ls -l
+          echo "roslyn-temp directory:"
+          ls -l roslyn-temp
           cd roslyn-temp
           echo "latest_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
@@ -51,18 +56,28 @@ jobs:
             echo "update_needed=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Log directory structure before running pr-finder
+        if: steps.check_update.outputs.update_needed == 'true'
+        run: |
+          echo "Root directory before running pr-finder:"
+          pwd
+          ls -l
+          echo ".config/dotnet-tools directory:"
+          ls -l .config/dotnet-tools
+          echo "roslyn-temp directory:"
+          ls -l roslyn-temp
+
       - name: Run pr-finder
         if: steps.check_update.outputs.update_needed == 'true'
         env:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-        working-directory: .config
         run: |
-          dotnet tool run roslyn-tools pr-finder \
+          ./.config/dotnet-tools/dotnet-roslyn-tools pr-finder \
             -s $LAST_SHA \
             -e $LATEST_SHA \
             --label changelog-worthy \
-            --format changelog > ../changelog.txt
+            --format changelog > changelog.txt
 
       - name: Update CHANGELOG.md
         if: steps.check_update.outputs.update_needed == 'true'
