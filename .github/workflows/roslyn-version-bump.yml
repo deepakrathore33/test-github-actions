@@ -1,243 +1,74 @@
-name: Automated Roslyn Version Bump
+name: Roslyn PR Finder
 
 on:
   workflow_dispatch:
-    inputs:
-      toolVersion:
-        description: 'Microsoft.RoslynTools version to use (leave blank for latest prerelease)'
-        required: false
-        type: string
+
 jobs:
-  bump-roslyn:
+  pr-finder:
     runs-on: ubuntu-latest
-    env:
-      TOOL_VERSION: ${{ inputs.toolVersion }}
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Setup .NET SDK
+      - name: Setup .NET (9 & 8)
         uses: actions/setup-dotnet@v3
         with:
-          # Install both .NET 9 (for roslyn-tools source build which targets net9.0) and .NET 8 (for repo usage/tests)
           dotnet-version: |
             9.0.x
             8.0.x
 
-      - name: .NET environment diagnostics
-        run: |
-          dotnet --info || true
-          echo "Initial global tool list:" 
-          dotnet tool list -g || true
-          echo "Workspace root: $(pwd)"
-
-      - name: Install Microsoft.RoslynTools (attempt global then local) 
-        id: install_tool
+      - name: Install roslyn-tools (global prerelease)
+        id: install
         run: |
           set -euo pipefail
-          echo "Requested TOOL_VERSION: '${TOOL_VERSION:-}'"
-          VERSION_ARG="--prerelease"
-          if [ -n "${TOOL_VERSION:-}" ]; then VERSION_ARG="--version ${TOOL_VERSION}"; fi
-          echo "Using VERSION_ARG=$VERSION_ARG"
-          echo "Uninstalling any existing global tool (ignore errors)"
-          dotnet tool uninstall -g Microsoft.RoslynTools || true
-          FEED_URL="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
-          echo "Feed URL: $FEED_URL"
-          echo "Attempting global install..."
-          if dotnet tool install -g Microsoft.RoslynTools $VERSION_ARG --add-source "$FEED_URL"; then
-            echo "Global install succeeded." 
-            echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-            echo "mode=global" >> "$GITHUB_OUTPUT"
-            dotnet tool list -g || true
-            which roslyn-tools || true
+          FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
+          echo "Installing roslyn-tools prerelease from $FEED"
+          dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          roslyn-tools --version
+
+      - name: Determine commit range
+        id: range
+        run: |
+          set -euo pipefail
+          mkdir -p .github
+          git clone --depth 2 https://github.com/dotnet/roslyn.git roslyn-temp
+          pushd roslyn-temp
+          END=$(git rev-parse HEAD)
+          if [ -f ../.github/roslyn-last-sha.txt ]; then
+            START=$(cat ../.github/roslyn-last-sha.txt)
+            echo "Using saved START SHA: $START"
           else
-            echo "Global install FAILED. Attempting local --tool-path install." >&2
-            rm -rf .config/dotnet-tools
-            mkdir -p .config/dotnet-tools
-            if dotnet tool install Microsoft.RoslynTools $VERSION_ARG --add-source "$FEED_URL" --tool-path ./.config/dotnet-tools; then
-              echo "Local tool-path install succeeded." 
-              echo "mode=local" >> "$GITHUB_OUTPUT"
-              ls -l .config/dotnet-tools || true
-            else
-              echo "Feed installs FAILED. Falling back to SOURCE BUILD of roslyn-tools repository." >&2
-              SRC_DIR="roslyn-tools-src"
-              rm -rf "$SRC_DIR"
-              git clone --depth 1 https://github.com/dotnet/roslyn-tools.git "$SRC_DIR"
-              echo "Cloned roslyn-tools. Contents:"; ls -1 "$SRC_DIR" || true
-              pushd "$SRC_DIR"
-              echo "Packing dotnet-roslyn-tools project (Release)..."
-              if dotnet pack src/dotnet-roslyn-tools -c Release -o out; then
-                ls -l out || true
-                PKG_PATH=$(ls out/Microsoft.RoslynTools.*.nupkg 2>/dev/null | head -n1 || true)
-                if [ -z "${PKG_PATH}" ]; then
-                  echo "No nupkg produced; aborting." >&2; popd; exit 1
-                fi
-                BUILT_VER=$(echo "${PKG_PATH}" | sed -E 's/.*Microsoft\.RoslynTools\.([0-9A-Za-z.-]+)\.nupkg/\1/')
-                echo "Built package version: ${BUILT_VER}"
-                popd
-                rm -rf .config/dotnet-tools
-                mkdir -p .config/dotnet-tools
-                if dotnet tool install Microsoft.RoslynTools --version "${BUILT_VER}" --add-source "${SRC_DIR}/out" --tool-path ./.config/dotnet-tools; then
-                  echo "Installed from source-built package version ${BUILT_VER}." 
-                  echo "mode=local-source" >> "$GITHUB_OUTPUT"
-                  ls -l .config/dotnet-tools || true
-                else
-                  echo "Failed to install from source-built package." >&2; exit 1
-                fi
-              else
-                echo "dotnet pack failed; aborting." >&2; popd || true; exit 1
-              fi
-            fi
+            # First run: use previous commit in history
+            START=$(git rev-parse HEAD~1 || echo $END)
+            echo "No saved SHA; using previous commit: $START"
           fi
-          echo "Installation step complete. GITHUB_OUTPUT file contents (if any):"
-          if [ -f "$GITHUB_OUTPUT" ]; then cat "$GITHUB_OUTPUT"; else echo "(no GITHUB_OUTPUT file accessible)"; fi
-
-      - name: Log directory structure after tool install
-        run: |
-          echo "Root directory after tool install:"; pwd; ls -l
-          echo "Home dotnet tools dir:"; ls -l "$HOME/.dotnet/tools" 2>/dev/null || echo "(no global tools dir)"
-          echo ".config/dotnet-tools dir:"; ls -l .config/dotnet-tools 2>/dev/null || echo "(no local tool-path dir)"
-
-      - name: Load last Roslyn SHA
-        id: load_sha
-        run: |
-          if [ -f .github/roslyn-last-sha.txt ]; then
-            echo "last_sha=$(cat .github/roslyn-last-sha.txt)" >> $GITHUB_OUTPUT
-          else
-            echo "last_sha=0000000000000000000000000000000000000000" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Get latest Roslyn SHA
-        id: get_latest_sha
-        run: |
-          git clone --depth 1 https://github.com/dotnet/roslyn.git roslyn-temp
-          echo "Root directory after git clone:"
-          pwd
-          ls -l
-          echo "roslyn-temp directory:"
-          ls -l roslyn-temp
-          cd roslyn-temp
-          echo "latest_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Check if update needed
-        id: check_update
-        run: |
-          if [ "${{ steps.load_sha.outputs.last_sha }}" = "${{ steps.get_latest_sha.outputs.latest_sha }}" ]; then
-            echo "update_needed=false" >> $GITHUB_OUTPUT
-          else
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Log directory structure before running pr-finder
-        if: steps.check_update.outputs.update_needed == 'true'
-        run: |
-          echo "Root directory before running pr-finder:"
-          pwd
-          ls -l
-          echo ".config/dotnet-tools directory:"
-          if [ -d .config/dotnet-tools ]; then ls -l .config/dotnet-tools; else echo "(no local tool-path dir)"; fi
-          echo "roslyn-temp directory:"
-          ls -l roslyn-temp
+          popd
+          echo "start_sha=$START" >> $GITHUB_OUTPUT
+          echo "end_sha=$END" >> $GITHUB_OUTPUT
 
       - name: Run pr-finder
-        if: steps.check_update.outputs.update_needed == 'true'
         env:
-          LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
-          LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-          INSTALL_MODE: ${{ steps.install_tool.outputs.mode }}
+          START: ${{ steps.range.outputs.start_sha }}
+          END: ${{ steps.range.outputs.end_sha }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "Install mode: ${INSTALL_MODE:-unknown}"
-          if [ "${INSTALL_MODE:-}" = "global" ]; then
-            TOOL_CMD="roslyn-tools"
-          elif [ -x "./.config/dotnet-tools/dotnet-roslyn-tools" ]; then
-            TOOL_CMD="./.config/dotnet-tools/dotnet-roslyn-tools"
-          elif command -v roslyn-tools >/dev/null 2>&1; then
-            echo "INSTALL_MODE missing but global roslyn-tools present; using it." 
-            TOOL_CMD="roslyn-tools"
-          else
-            echo "Unable to determine roslyn-tools executable location." >&2
-            echo "Listing current directory:"; ls -l
-            exit 1
-          fi
-          echo "Using TOOL_CMD=$TOOL_CMD"
-          $TOOL_CMD --version || true
-          $TOOL_CMD --help 2>/dev/null | head -n 20 || true
+          echo "Finding PRs between $START and $END"
+          pushd roslyn-temp
+          roslyn-tools pr-finder -s "$START" -e "$END" --label changelog-worthy --format changelog > ../pr-changelog.txt
+          popd
+          echo "--- PR Changelog (first 100 lines) ---"
+          head -n 100 pr-changelog.txt || true
 
-          if [ "$LAST_SHA" = "0000000000000000000000000000000000000000" ]; then
-            echo "First run detected; generating placeholder changelog." >&2
-            echo "(Initial run – no previous SHA to diff)" > changelog.txt
-          else
-            if [ ! -d roslyn-temp ]; then echo "roslyn-temp directory missing" >&2; exit 1; fi
-            pushd roslyn-temp
-            echo "Running pr-finder between $LAST_SHA and $LATEST_SHA in $(pwd)"
-            set +e
-            $TOOL_CMD pr-finder \
-              -s "$LAST_SHA" \
-              -e "$LATEST_SHA" \
-              --label changelog-worthy \
-              --format changelog > ../changelog.txt 2>../pr-finder.stderr
-            EXIT_CODE=$?
-            set -e
-            popd
-            if [ $EXIT_CODE -ne 0 ]; then
-              echo "pr-finder failed with exit code $EXIT_CODE" >&2
-              echo "--- stderr ---" >&2
-              cat pr-finder.stderr >&2 || true
-              echo "(pr-finder failed; placeholder changelog)" > changelog.txt
-            fi
-          fi
-          ls -l "$TOOL_CMD" 2>/dev/null || true
-          echo "Changelog preview:"; head -n 40 changelog.txt || true
-
-      - name: Update CHANGELOG.md
-        if: steps.check_update.outputs.update_needed == 'true'
-        env:
-          LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
+      - name: Save end SHA for next run
         run: |
-          echo "* Bump Roslyn to $LATEST_SHA" > header.txt
-          cat header.txt changelog.txt CHANGELOG.md > updated.md
-          mv updated.md CHANGELOG.md
+          echo "${{ steps.range.outputs.end_sha }}" > .github/roslyn-last-sha.txt
+          echo "Saved latest SHA: $(cat .github/roslyn-last-sha.txt)"
 
-      - name: Update package.json
-        if: steps.check_update.outputs.update_needed == 'true'
-        env:
-          LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-        run: |
-          jq --arg sha "$LATEST_SHA" '.defaults.roslyn = $sha' package.json > tmp.json && mv tmp.json package.json
-
-      - name: Run CI validation
-        if: steps.check_update.outputs.update_needed == 'true'
-        run: |
-          npm install
-          npm test
-
-      - name: Commit changes
-        if: steps.check_update.outputs.update_needed == 'true'
-        env:
-          LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git checkout -b roslyn-auto-update
-          git add CHANGELOG.md package.json
-          git commit -m "Automated Roslyn version bump to $LATEST_SHA"
-
-      - name: Create Pull Request
-        if: steps.check_update.outputs.update_needed == 'true'
-        uses: peter-evans/create-pull-request@v5
+      - name: Upload changelog artifact
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          title: "Automated Roslyn Version Bump"
-          body: |
-            This PR updates the Roslyn version to `${{ steps.get_latest_sha.outputs.latest_sha }}` and includes changelog entries from PRs labeled `changelog-worthy`.
-          branch: roslyn-auto-update
-          commit-message: "Automated Roslyn version bump to ${{ steps.get_latest_sha.outputs.latest_sha }}"
-
-      - name: Save latest SHA
-        if: steps.check_update.outputs.update_needed == 'true'
-        env:
-          LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
-        run: echo "$LATEST_SHA" > .github/roslyn-last-sha.txt
+          name: pr-changelog
+          path: pr-changelog.txt
