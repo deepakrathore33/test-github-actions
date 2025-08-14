@@ -27,31 +27,6 @@ jobs:
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
           roslyn-tools --version
 
-      - name: Authenticate roslyn-tools
-        env:
-          # Provide the same token under multiple var names to satisfy tool expectations
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ROSLYNTOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ROSLYN_TOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo "Attempting roslyn-tools authenticate (non-fatal if it fails)."
-          if roslyn-tools authenticate --help 2>/dev/null | grep -qi github; then
-            # Try common flag patterns (ignore failures)
-            roslyn-tools authenticate --github-token "$GITHUB_TOKEN" --ci 2>&1 || true
-            roslyn-tools authenticate --github "$GITHUB_TOKEN" 2>&1 || true
-          else
-            echo "authenticate command help did not mention github; proceeding anyway." || true
-          fi
-          # Show any settings produced
-          if [ -d "$HOME/.roslyn-tools" ]; then
-            echo "Contents of ~/.roslyn-tools:"; ls -R "$HOME/.roslyn-tools" || true
-          else
-            echo "No ~/.roslyn-tools directory created." || true
-          fi
-
       - name: Determine commit range
         id: range
         run: |
@@ -78,14 +53,15 @@ jobs:
           END: ${{ steps.range.outputs.end_sha }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ROSLYNTOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ROSLYN_TOOLS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "Finding PRs between $START and $END"
           pushd roslyn-temp
-          roslyn-tools pr-finder -s "$START" -e "$END" --label changelog-worthy --format changelog > ../pr-changelog.txt
+          echo "(Showing pr-finder help)"; roslyn-tools pr-finder --help || true
+          roslyn-tools pr-finder -s "$START" -e "$END" --github-token "$GITHUB_TOKEN" --label changelog-worthy --format changelog > ../pr-changelog.txt || {
+            echo "pr-finder failed (exit $?) - fallback to diff link" >&2
+            echo "[View Diff](https://github.com/dotnet/roslyn/compare/$START...$END?w=1)" > ../pr-changelog.txt
+          }
           popd
           echo "--- PR Changelog (first 100 lines) ---"
           head -n 100 pr-changelog.txt || true
