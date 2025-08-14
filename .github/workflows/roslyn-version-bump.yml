@@ -19,7 +19,10 @@ jobs:
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v3
         with:
-          dotnet-version: '8.0.x'
+          # Install both .NET 9 (for roslyn-tools source build which targets net9.0) and .NET 8 (for repo usage/tests)
+          dotnet-version: |
+            9.0.x
+            8.0.x
 
       - name: .NET environment diagnostics
         run: |
