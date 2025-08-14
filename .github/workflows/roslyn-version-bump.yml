@@ -14,17 +14,27 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install Microsoft.RoslynTools
+      - name: Ensure .config directory exists
+        run: mkdir -p .config
+
+      - name: Create tool manifest if needed
         run: |
-          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
+          if [ ! -f .config/dotnet-tools.json ]; then
+            dotnet new tool-manifest --output .config
+          fi
+
+      - name: Install Microsoft.RoslynTools
+        working-directory: .config
+        run: |
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
 
       - name: Log directory structure after tool install
         run: |
           echo "Root directory after tool install:"
           pwd
           ls -l
-          echo ".config/dotnet-tools directory:"
-          ls -l .config/dotnet-tools
+          echo ".config directory:"
+          ls -l .config
 
       - name: Load last Roslyn SHA
         id: load_sha
@@ -72,12 +82,13 @@ jobs:
         env:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
+        working-directory: .config
         run: |
-          ./.config/dotnet-tools/dotnet-roslyn-tools pr-finder \
+          dotnet tool run roslyn-tools pr-finder \
             -s $LAST_SHA \
             -e $LATEST_SHA \
             --label changelog-worthy \
-            --format changelog > changelog.txt
+            --format changelog > ../changelog.txt
 
       - name: Update CHANGELOG.md
         if: steps.check_update.outputs.update_needed == 'true'
