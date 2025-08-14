@@ -3,29 +3,28 @@ name: Roslyn PR Finder
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   pr-finder:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET (9 & 8)
+      - name: Setup .NET (9)
         uses: actions/setup-dotnet@v3
         with:
-          dotnet-version: |
-            9.0.x
-            8.0.x
+          dotnet-version: 9.0.x
 
-      - name: Install roslyn-tools (global prerelease)
-        id: install
+      - name: Install roslyn-tools
         run: |
           set -euo pipefail
           FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
-          echo "Installing roslyn-tools prerelease from $FEED"
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-          roslyn-tools --version
 
       - name: Determine commit range
         id: range
@@ -33,64 +32,41 @@ jobs:
           set -euo pipefail
           mkdir -p .github
           git clone --depth 2 https://github.com/dotnet/roslyn.git roslyn-temp
-          pushd roslyn-temp
-          END=$(git rev-parse HEAD)
-          if [ -f ../.github/roslyn-last-sha.txt ]; then
-            START=$(cat ../.github/roslyn-last-sha.txt)
-            echo "Using saved START SHA: $START"
+          END=$(git -C roslyn-temp rev-parse HEAD)
+          if [ -f .github/roslyn-last-sha.txt ]; then
+            START=$(cat .github/roslyn-last-sha.txt)
           else
-            # First run: use previous commit in history
-            START=$(git rev-parse HEAD~1 || echo $END)
-            echo "No saved SHA; using previous commit: $START"
+            START=$(git -C roslyn-temp rev-parse HEAD~1 || echo "$END")
           fi
-          popd
           echo "start_sha=$START" >> $GITHUB_OUTPUT
           echo "end_sha=$END" >> $GITHUB_OUTPUT
 
-      - name: Write roslyn-tools settings (GitHub token)
+      - name: Write settings (GitHub token)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          SETTINGS_DIR="$HOME/.roslyn-tools"
-          mkdir -p "$SETTINGS_DIR"
-          # Create JSON with GitHubToken only; other tokens blank
+          mkdir -p "$HOME/.roslyn-tools"
           JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "$GITHUB_TOKEN")
-          ENCODED=$(printf '%s' "$JSON" | base64 -w0 2>/dev/null || printf '%s' "$JSON" | base64)
-          printf '%s' "$ENCODED" > "$SETTINGS_DIR/settings"
-          echo "Wrote settings file: $SETTINGS_DIR/settings"
-          echo "(Length: $(wc -c < "$SETTINGS_DIR/settings"))"
-          # Do a quick decode sanity check (not printing secret value)
-          head -c 10 "$SETTINGS_DIR/settings" || true
-          # List directory contents (file should be present)
-          ls -l "$SETTINGS_DIR" || true
+          printf '%s' "$JSON" | base64 | tr -d '\n' > "$HOME/.roslyn-tools/settings"
 
       - name: Run pr-finder
         env:
           START: ${{ steps.range.outputs.start_sha }}
           END: ${{ steps.range.outputs.end_sha }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "Finding PRs between $START and $END"
-          pushd roslyn-temp
-          echo "(Showing pr-finder help)"; roslyn-tools pr-finder --help || true
-          # Token is supplied via ~/.roslyn-tools/settings (base64 encoded JSON) created earlier
-          roslyn-tools pr-finder -s "$START" -e "$END" --label changelog-worthy --format changelog > ../pr-changelog.txt || {
-            echo "pr-finder failed (exit $?) - fallback to diff link" >&2
-            echo "[View Diff](https://github.com/dotnet/roslyn/compare/$START...$END?w=1)" > ../pr-changelog.txt
+          roslyn-tools pr-finder -s "$START" -e "$END" --format changelog > pr-changelog.txt || {
+            echo "[View Diff](https://github.com/dotnet/roslyn/compare/$START...$END?w=1)" > pr-changelog.txt
           }
-          popd
-          echo "--- PR Changelog (first 100 lines) ---"
-          head -n 100 pr-changelog.txt || true
+          head -n 50 pr-changelog.txt || true
 
-      - name: Save end SHA for next run
+      - name: Save end SHA
         run: |
           echo "${{ steps.range.outputs.end_sha }}" > .github/roslyn-last-sha.txt
-          echo "Saved latest SHA: $(cat .github/roslyn-last-sha.txt)"
+          echo "Saved: $(cat .github/roslyn-last-sha.txt)"
 
-      - name: Upload changelog artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: pr-changelog
