@@ -76,7 +76,8 @@ jobs:
           echo "Finding PRs between $START and $END"
           pushd roslyn-temp
           echo "(Showing pr-finder help)"; roslyn-tools pr-finder --help || true
-          roslyn-tools pr-finder -s "$START" -e "$END" --github-token "$GITHUB_TOKEN" --label changelog-worthy --format changelog > ../pr-changelog.txt || {
+          # Token is supplied via ~/.roslyn-tools/settings (base64 encoded JSON) created earlier
+          roslyn-tools pr-finder -s "$START" -e "$END" --label changelog-worthy --format changelog > ../pr-changelog.txt || {
             echo "pr-finder failed (exit $?) - fallback to diff link" >&2
             echo "[View Diff](https://github.com/dotnet/roslyn/compare/$START...$END?w=1)" > ../pr-changelog.txt
           }
