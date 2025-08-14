@@ -14,18 +14,17 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install Microsoft.RoslynTools globally
+      - name: Install Microsoft.RoslynTools locally
         run: |
-          dotnet tool install -g Microsoft.RoslynTools --version 1.1.0-beta3.25411.2 --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json
-          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+          dotnet tool install Microsoft.RoslynTools --prerelease --add-source https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json --tool-path ./.config/dotnet-tools || echo "Microsoft.RoslynTools already installed"
 
       - name: Log directory structure after tool install
         run: |
           echo "Root directory after tool install:"
           pwd
           ls -l
-          echo "$HOME/.dotnet/tools directory:"
-          ls -l $HOME/.dotnet/tools
+          echo ".config/dotnet-tools directory:"
+          ls -l .config/dotnet-tools
 
       - name: Load last Roslyn SHA
         id: load_sha
@@ -74,7 +73,7 @@ jobs:
           LAST_SHA: ${{ steps.load_sha.outputs.last_sha }}
           LATEST_SHA: ${{ steps.get_latest_sha.outputs.latest_sha }}
         run: |
-          roslyn-tools pr-finder \
+          ./.config/dotnet-tools/dotnet-roslyn-tools pr-finder \
             -s $LAST_SHA \
             -e $LATEST_SHA \
             --label changelog-worthy \
