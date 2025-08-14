@@ -89,7 +89,8 @@ jobs:
               fi
             fi
           fi
-          echo "Installation step complete. Mode: $(grep mode= \"$GITHUB_OUTPUT\" || true)"
+          echo "Installation step complete. GITHUB_OUTPUT file contents (if any):"
+          if [ -f "$GITHUB_OUTPUT" ]; then cat "$GITHUB_OUTPUT"; else echo "(no GITHUB_OUTPUT file accessible)"; fi
 
       - name: Log directory structure after tool install
         run: |
@@ -134,7 +135,7 @@ jobs:
           pwd
           ls -l
           echo ".config/dotnet-tools directory:"
-          ls -l .config/dotnet-tools
+          if [ -d .config/dotnet-tools ]; then ls -l .config/dotnet-tools; else echo "(no local tool-path dir)"; fi
           echo "roslyn-temp directory:"
           ls -l roslyn-temp
 
@@ -149,8 +150,15 @@ jobs:
           echo "Install mode: ${INSTALL_MODE:-unknown}"
           if [ "${INSTALL_MODE:-}" = "global" ]; then
             TOOL_CMD="roslyn-tools"
-          else
+          elif [ -x "./.config/dotnet-tools/dotnet-roslyn-tools" ]; then
             TOOL_CMD="./.config/dotnet-tools/dotnet-roslyn-tools"
+          elif command -v roslyn-tools >/dev/null 2>&1; then
+            echo "INSTALL_MODE missing but global roslyn-tools present; using it." 
+            TOOL_CMD="roslyn-tools"
+          else
+            echo "Unable to determine roslyn-tools executable location." >&2
+            echo "Listing current directory:"; ls -l
+            exit 1
           fi
           echo "Using TOOL_CMD=$TOOL_CMD"
           ls -l "$TOOL_CMD" 2>/dev/null || true
