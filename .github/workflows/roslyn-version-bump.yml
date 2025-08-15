@@ -25,79 +25,100 @@ jobs:
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Get SHAs
+      - name: Determine latest Roslyn package version
+        id: version
+        run: |
+            set -euo pipefail
+            URL="https://api.nuget.org/v3/registration5-gz-semver2/microsoft.codeanalysis.common/index.json"
+            LATEST=$(curl -sSL "$URL" | grep -o '"version":"[^"]*"' | cut -d'"' -f4 | sort -u -V | tail -n1)
+            if [ -z "$LATEST" ]; then echo "Failed to resolve latest package version" >&2; exit 1; fi
+            CURRENT=$(grep -oE '"roslyn"[[:space:]]*:[[:space:]]*"[^"]+"' package.json | head -n1 | sed -E 's/.*"roslyn"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+            echo "latest=$LATEST" >> $GITHUB_OUTPUT
+            
+            if [ -n "$CURRENT" ]; then echo "current=$CURRENT" >> $GITHUB_OUTPUT; fi
+            if [ "$LATEST" = "$CURRENT" ]; then echo "up_to_date=true" >> $GITHUB_OUTPUT; fi
+            echo "Latest: $LATEST Current: ${CURRENT:-<none>}"
+
+      - name: Stop if version already current
+        if: steps.version.outputs.up_to_date == 'true'
+        run: echo "No new Roslyn version published."
+
+      - name: Clone roslyn and pick commit range
+        if: steps.version.outputs.up_to_date != 'true'
         id: sha
         run: |
-          set -euo pipefail
-          echo "Cloning roslyn (shallow)..."
-          git clone --no-tags --depth 10 https://github.com/dotnet/roslyn.git roslyn
-          LATEST=$(git -C roslyn rev-parse HEAD)
-          echo "Latest commit: $LATEST"
-          if [ -f .github/roslyn-last-sha.txt ]; then
-            LAST=$(cat .github/roslyn-last-sha.txt)
-            echo "Found stored last sha: $LAST"
-          else
-            # Get the second commit we have in the shallow history (may be blank if only one commit was fetched)
-            SECOND=$(git -C roslyn rev-list --max-count=2 HEAD | tail -n1 || true)
-            if [ -n "$SECOND" ] && [ "$SECOND" != "$LATEST" ]; then
-              LAST="$SECOND"
-              echo "Derived previous commit from shallow history: $LAST"
+            set -euo pipefail
+            git clone --no-tags --depth 50 https://github.com/dotnet/roslyn.git roslyn
+            END=$(git -C roslyn rev-parse HEAD)
+            if [ -f .github/roslyn-last-sha.txt ]; then
+              START=$(cat .github/roslyn-last-sha.txt)
+              echo "Using stored start commit: $START"
             else
-              LAST="$LATEST"
-              echo "Only one commit available; using latest for last: $LAST"
+              START=$(git -C roslyn rev-list --max-count=2 HEAD | tail -n1 || git -C roslyn rev-parse HEAD)
+              echo "Derived start commit: $START"
             fi
-          fi
-          echo "latest=$LATEST" >> $GITHUB_OUTPUT
-          echo "last=$LAST" >> $GITHUB_OUTPUT
-          if [ "$LATEST" = "$LAST" ]; then echo "up_to_date=true" >> $GITHUB_OUTPUT; fi
-
-      - name: Stop if up to date
-        if: steps.sha.outputs.up_to_date == 'true'
-        run: echo "No new commit"
+            echo "start=$START" >> $GITHUB_OUTPUT
+            echo "end=$END" >> $GITHUB_OUTPUT
+            echo "End commit: $END"
 
       - name: Auth settings
-        if: steps.sha.outputs.up_to_date != 'true'
+        if: steps.version.outputs.up_to_date != 'true'
         run: |
-          mkdir -p $HOME/.roslyn-tools
-          JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "${{ secrets.GITHUB_TOKEN }}")
-          printf '%s' "$JSON" | base64 | tr -d '\n' > $HOME/.roslyn-tools/settings
+            mkdir -p $HOME/.roslyn-tools
+            JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "${{ secrets.GITHUB_TOKEN }}")
+            printf '%s' "$JSON" | base64 | tr -d '\n' > $HOME/.roslyn-tools/settings
 
-      - name: Generate changelog
-        if: steps.sha.outputs.up_to_date != 'true'
+      - name: Generate PR list (label filtered)
+        if: steps.version.outputs.up_to_date != 'true'
+        id: changelog
+        env:
+          LABEL: vscode
         run: |
-          roslyn-tools pr-finder -s "${{ steps.sha.outputs.last }}" -e "${{ steps.sha.outputs.latest }}" --format changelog > pr-changelog.txt || echo "[Diff](https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.last }}...${{ steps.sha.outputs.latest }}?w=1)" > pr-changelog.txt
-          head -n 30 pr-changelog.txt || true
+            set -euo pipefail
+            roslyn-tools pr-finder -s "${{ steps.sha.outputs.start }}" -e "${{ steps.sha.outputs.end }}" --label "$LABEL" --format changelog > pr-changelog.txt || echo "(pr-finder failed)" > pr-changelog.txt
 
-      - name: Update files
-        if: steps.sha.outputs.up_to_date != 'true'
+      - name: Update package.json version
+        if: steps.version.outputs.up_to_date != 'true'
         run: |
-          echo "${{ steps.sha.outputs.latest }}" > roslyn-version.txt
-          TITLE="## Roslyn Update ($(date -u +%Y-%m-%d))"
-          DIFF="https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.last }}...${{ steps.sha.outputs.latest }}?w=1"
-          { echo "$TITLE"; echo "Latest: ${{ steps.sha.outputs.latest }}"; echo "Previous: ${{ steps.sha.outputs.last }}"; echo "Diff: $DIFF"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG_ROSLYN.md 2>/dev/null > _tmp && mv _tmp CHANGELOG_ROSLYN.md
-          echo "${{ steps.sha.outputs.latest }}" > .github/roslyn-last-sha.txt
+            set -euo pipefail
+            NEW="${{ steps.version.outputs.latest }}"
+            # Replace existing roslyn version line in place
+            if grep -q '"roslyn"' package.json; then
+              sed -i.bak -E "s/(\"roslyn\"[[:space:]]*:[[:space:]]*\")([^"]+)(\")/\1${NEW}\3/" package.json
+              rm -f package.json.bak
+            else
+              echo "Did not find roslyn key in package.json" >&2; exit 1
+            fi
+            grep -n '"roslyn"' package.json
 
-      - name: Commit & PR
-        if: steps.sha.outputs.up_to_date != 'true'
+      - name: Update CHANGELOG
+        if: steps.version.outputs.up_to_date != 'true'
+        run: |
+            set -euo pipefail
+            NEW="${{ steps.version.outputs.latest }}"
+            DATE=$(date -u +%Y-%m-%d)
+            HEADER="### Roslyn bump ${NEW} (${DATE})"
+            { echo "$HEADER"; echo; echo "* Bump Roslyn to ${NEW}"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG.md 2>/dev/null > _tmp && mv _tmp CHANGELOG.md
+            echo "Changelog updated."
+
+      - name: Store last processed commit
+        if: steps.version.outputs.up_to_date != 'true'
+        run: echo "${{ steps.sha.outputs.end }}" > .github/roslyn-last-sha.txt
+
+      - name: Cleanup clone
+        if: steps.version.outputs.up_to_date != 'true'
+        run: rm -rf roslyn || true
+
+      - name: Create PR
+        if: steps.version.outputs.up_to_date != 'true'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: roslyn-bump/${{ steps.sha.outputs.latest }}
-          commit-message: "Roslyn bump: ${{ steps.sha.outputs.latest }}"
-          title: "Roslyn bump: ${{ steps.sha.outputs.latest }}"
+          branch: roslyn-bump/${{ steps.version.outputs.latest }}
+          commit-message: "Bump Roslyn to ${{ steps.version.outputs.latest }}"
+          title: "Bump Roslyn to ${{ steps.version.outputs.latest }}"
           body: |
-            Automated Roslyn bump.
-            Latest: `${{ steps.sha.outputs.latest }}`
-            Previous: `${{ steps.sha.outputs.last }}`
-            Diff: https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.last }}...${{ steps.sha.outputs.latest }}?w=1
-            Review the added section in CHANGELOG_ROSLYN.md.
-
-      - name: Upload changelog
-        if: steps.sha.outputs.up_to_date != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: roslyn-changelog
-          path: |
-            pr-changelog.txt
-            CHANGELOG_ROSLYN.md
-            roslyn-version.txt
+            Automated Roslyn version bump to `${{ steps.version.outputs.latest }}`.
+            Commit range: `${{ steps.sha.outputs.start }}` ... `${{ steps.sha.outputs.end }}`.
+            Filter label: vscode
+            See CHANGELOG.md for included PRs.
