@@ -28,12 +28,28 @@ jobs:
       - name: Get SHAs
         id: sha
         run: |
-          git clone --depth 2 https://github.com/dotnet/roslyn.git roslyn
+          set -euo pipefail
+          echo "Cloning roslyn (shallow)..."
+          git clone --no-tags --depth 10 https://github.com/dotnet/roslyn.git roslyn
           LATEST=$(git -C roslyn rev-parse HEAD)
-          if [ -f .github/roslyn-last-sha.txt ]; then LAST=$(cat .github/roslyn-last-sha.txt); else LAST=$(git -C roslyn rev-parse HEAD~1 || echo "$LATEST"); fi
+          echo "Latest commit: $LATEST"
+          if [ -f .github/roslyn-last-sha.txt ]; then
+            LAST=$(cat .github/roslyn-last-sha.txt)
+            echo "Found stored last sha: $LAST"
+          else
+            # Get the second commit we have in the shallow history (may be blank if only one commit was fetched)
+            SECOND=$(git -C roslyn rev-list --max-count=2 HEAD | tail -n1 || true)
+            if [ -n "$SECOND" ] && [ "$SECOND" != "$LATEST" ]; then
+              LAST="$SECOND"
+              echo "Derived previous commit from shallow history: $LAST"
+            else
+              LAST="$LATEST"
+              echo "Only one commit available; using latest for last: $LAST"
+            fi
+          fi
           echo "latest=$LATEST" >> $GITHUB_OUTPUT
           echo "last=$LAST" >> $GITHUB_OUTPUT
-          [ "$LATEST" = "$LAST" ] && echo "up_to_date=true" >> $GITHUB_OUTPUT
+          if [ "$LATEST" = "$LAST" ]; then echo "up_to_date=true" >> $GITHUB_OUTPUT; fi
 
       - name: Stop if up to date
         if: steps.sha.outputs.up_to_date == 'true'
