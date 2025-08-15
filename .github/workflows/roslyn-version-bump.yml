@@ -1,73 +1,87 @@
-name: Roslyn PR Finder
+name: Roslyn Version Bump
 
 on:
+  schedule:
+    - cron: '0 9 * * *'
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pull-requests: read
+  contents: write
+  pull-requests: write
 
 jobs:
-  pr-finder:
+  bump:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET (9)
-        uses: actions/setup-dotnet@v3
+      - uses: actions/setup-dotnet@v3
         with:
           dotnet-version: 9.0.x
 
       - name: Install roslyn-tools
         run: |
-          set -euo pipefail
           FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Determine commit range
-        id: range
+      - name: Get SHAs
+        id: sha
         run: |
-          set -euo pipefail
-          mkdir -p .github
-          git clone --depth 2 https://github.com/dotnet/roslyn.git roslyn-temp
-          END=$(git -C roslyn-temp rev-parse HEAD)
-          if [ -f .github/roslyn-last-sha.txt ]; then
-            START=$(cat .github/roslyn-last-sha.txt)
-          else
-            START=$(git -C roslyn-temp rev-parse HEAD~1 || echo "$END")
-          fi
-          echo "start_sha=$START" >> $GITHUB_OUTPUT
-          echo "end_sha=$END" >> $GITHUB_OUTPUT
+          git clone --depth 2 https://github.com/dotnet/roslyn.git roslyn
+          LATEST=$(git -C roslyn rev-parse HEAD)
+          if [ -f .github/roslyn-last-sha.txt ]; then LAST=$(cat .github/roslyn-last-sha.txt); else LAST=$(git -C roslyn rev-parse HEAD~1 || echo "$LATEST"); fi
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "last=$LAST" >> $GITHUB_OUTPUT
+          [ "$LATEST" = "$LAST" ] && echo "up_to_date=true" >> $GITHUB_OUTPUT
 
-      - name: Write settings (GitHub token)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stop if up to date
+        if: steps.sha.outputs.up_to_date == 'true'
+        run: echo "No new commit"
+
+      - name: Auth settings
+        if: steps.sha.outputs.up_to_date != 'true'
         run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.roslyn-tools"
-          JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "$GITHUB_TOKEN")
-          printf '%s' "$JSON" | base64 | tr -d '\n' > "$HOME/.roslyn-tools/settings"
+          mkdir -p $HOME/.roslyn-tools
+          JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "${{ secrets.GITHUB_TOKEN }}")
+          printf '%s' "$JSON" | base64 | tr -d '\n' > $HOME/.roslyn-tools/settings
 
-      - name: Run pr-finder
-        env:
-          START: ${{ steps.range.outputs.start_sha }}
-          END: ${{ steps.range.outputs.end_sha }}
+      - name: Generate changelog
+        if: steps.sha.outputs.up_to_date != 'true'
         run: |
-          set -euo pipefail
-          roslyn-tools pr-finder -s "$START" -e "$END" --format changelog > pr-changelog.txt || {
-            echo "[View Diff](https://github.com/dotnet/roslyn/compare/$START...$END?w=1)" > pr-changelog.txt
-          }
-          head -n 50 pr-changelog.txt || true
+          roslyn-tools pr-finder -s "${{ steps.sha.outputs.last }}" -e "${{ steps.sha.outputs.latest }}" --format changelog > pr-changelog.txt || echo "[Diff](https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.last }}...${{ steps.sha.outputs.latest }}?w=1)" > pr-changelog.txt
+          head -n 30 pr-changelog.txt || true
 
-      - name: Save end SHA
+      - name: Update files
+        if: steps.sha.outputs.up_to_date != 'true'
         run: |
-          echo "${{ steps.range.outputs.end_sha }}" > .github/roslyn-last-sha.txt
-          echo "Saved: $(cat .github/roslyn-last-sha.txt)"
+          echo "${{ steps.sha.outputs.latest }}" > roslyn-version.txt
+          TITLE="## Roslyn Update ($(date -u +%Y-%m-%d))"
+          DIFF="https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.last }}...${{ steps.sha.outputs.latest }}?w=1"
+          { echo "$TITLE"; echo "Latest: ${{ steps.sha.outputs.latest }}"; echo "Previous: ${{ steps.sha.outputs.last }}"; echo "Diff: $DIFF"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG_ROSLYN.md 2>/dev/null > _tmp && mv _tmp CHANGELOG_ROSLYN.md
+          echo "${{ steps.sha.outputs.latest }}" > .github/roslyn-last-sha.txt
 
-      - name: Upload artifact
+      - name: Commit & PR
+        if: steps.sha.outputs.up_to_date != 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: roslyn-bump/${{ steps.sha.outputs.latest }}
+          commit-message: "Roslyn bump: ${{ steps.sha.outputs.latest }}"
+          title: "Roslyn bump: ${{ steps.sha.outputs.latest }}"
+          body: |
+            Automated Roslyn bump.
+            Latest: `${{ steps.sha.outputs.latest }}`
+            Previous: `${{ steps.sha.outputs.last }}`
+            Diff: https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.last }}...${{ steps.sha.outputs.latest }}?w=1
+            Review the added section in CHANGELOG_ROSLYN.md.
+
+      - name: Upload changelog
+        if: steps.sha.outputs.up_to_date != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: pr-changelog
-          path: pr-changelog.txt
+          name: roslyn-changelog
+          path: |
+            pr-changelog.txt
+            CHANGELOG_ROSLYN.md
+            roslyn-version.txt
