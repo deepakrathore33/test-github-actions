@@ -1,3 +1,12 @@
+### Roslyn changes (2025-08-15)
+
+Range: db8702edcdf44c7a45299c2035c11104a4a394ea...a073f055d93dd0e598afac58e7dce9441de9eb26
+Diff: https://github.com/dotnet/roslyn/compare/db8702edcdf44c7a45299c2035c11104a4a394ea...a073f055d93dd0e598afac58e7dce9441de9eb26?w=1
+
+#### PRs
+
+[View Complete Diff of Changes](https://github.com/dotnet/roslyn/compare/db8702edcdf44c7a45299c2035c11104a4a394ea...a073f055d93dd0e598afac58e7dce9441de9eb26?w=1)
+
 ## Known Issues
 
 - Diagnostics related feature requests and improvements [#5951](https://github.com/dotnet/vscode-csharp/issues/5951)
