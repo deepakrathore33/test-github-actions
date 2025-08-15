@@ -67,6 +67,8 @@ jobs:
           set -euo pipefail
           START="${{ steps.sha.outputs.start }}"
           END="${{ steps.sha.outputs.end }}"
+          # Run inside the roslyn clone so pr-finder can access repo metadata
+          pushd roslyn >/dev/null
           CMD=(roslyn-tools pr-finder -s "$START" -e "$END" --format changelog)
           if [ -n "${LABEL:-}" ]; then
             CMD+=(--label "$LABEL")
@@ -108,6 +110,20 @@ jobs:
           if [ -s err.log ]; then
             echo "---- pr-finder stderr summary ----"; (sed 's/^/stderr: /' err.log || true); echo "----------------------------------";
           fi
+          popd >/dev/null
+          # Move result file out if created inside roslyn (we wrote to ../ since we stayed in clone when redirecting)
+          if [ -f roslyn/pr-changelog.txt ] && [ ! -f pr-changelog.txt ]; then
+            mv roslyn/pr-changelog.txt pr-changelog.txt || true
+          fi
+
+      - name: Detect empty changelog
+        if: steps.sha.outputs.no_change != 'true'
+        id: empty
+        run: |
+          if grep -qE '^(\(no matching PRs\)|\(pr-finder failed\))$' pr-changelog.txt; then
+            echo "No PR content to create a PR for.";
+            echo "empty=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Update CHANGELOG
         if: steps.sha.outputs.no_change != 'true'
@@ -128,7 +144,7 @@ jobs:
         run: rm -rf roslyn || true
 
       - name: Create PR
-        if: steps.sha.outputs.no_change != 'true'
+        if: steps.sha.outputs.no_change != 'true' && steps.empty.outputs.empty != 'true'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -138,5 +154,5 @@ jobs:
           body: |
             Automated Roslyn commit-range changelog.
             Range: `${{ steps.sha.outputs.start }}` ... `${{ steps.sha.outputs.end }}`
-            Label filter: vscode
+            Label filter: VSCode
             See CHANGELOG.md for details.
