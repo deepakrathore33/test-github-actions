@@ -29,15 +29,41 @@ jobs:
         id: version
         run: |
             set -euo pipefail
-            URL="https://api.nuget.org/v3/registration5-gz-semver2/microsoft.codeanalysis.common/index.json"
-            LATEST=$(curl -sSL "$URL" | grep -o '"version":"[^"]*"' | cut -d'"' -f4 | sort -u -V | tail -n1)
-            if [ -z "$LATEST" ]; then echo "Failed to resolve latest package version" >&2; exit 1; fi
+            REG_URL="https://api.nuget.org/v3/registration5-gz-semver2/microsoft.codeanalysis.common/index.json"
+            FLAT_URL="https://api.nuget.org/v3-flatcontainer/microsoft.codeanalysis.common/index.json"
+            ATTEMPTS=0
+            LATEST=""
+            while [ $ATTEMPTS -lt 3 ] && [ -z "$LATEST" ]; do
+              ATTEMPTS=$((ATTEMPTS+1))
+              echo "Attempt $ATTEMPTS: querying registration index" >&2
+              RAW=$(curl -fsSL "$REG_URL" || true)
+              if [ -n "$RAW" ]; then
+                LATEST=$(printf '%s' "$RAW" | grep -o '"version":"[^"]*"' | cut -d'"' -f4 | sort -u -V | tail -n1 || true)
+              fi
+              if [ -z "$LATEST" ]; then
+                echo "Registration attempt $ATTEMPTS failed to produce version; sleeping 2s" >&2
+                sleep 2
+              fi
+            done
+            if [ -z "$LATEST" ]; then
+              echo "Falling back to flat container index" >&2
+              RAW=$(curl -fsSL "$FLAT_URL" || true)
+              if command -v jq >/dev/null 2>&1; then
+                LATEST=$(printf '%s' "$RAW" | jq -r '.versions[]' 2>/dev/null | sort -u -V | tail -n1 || true)
+              else
+                LATEST=$(printf '%s' "$RAW" | grep -o '"[0-9][^"]*"' | tr -d '"' | sort -u -V | tail -n1 || true)
+              fi
+            fi
+            if [ -z "$LATEST" ]; then
+              echo "WARNING: Could not determine latest Roslyn package version; skipping bump this run." >&2
+              echo "up_to_date=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
             CURRENT=$(grep -oE '"roslyn"[[:space:]]*:[[:space:]]*"[^"]+"' package.json | head -n1 | sed -E 's/.*"roslyn"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
             echo "latest=$LATEST" >> $GITHUB_OUTPUT
-            
             if [ -n "$CURRENT" ]; then echo "current=$CURRENT" >> $GITHUB_OUTPUT; fi
             if [ "$LATEST" = "$CURRENT" ]; then echo "up_to_date=true" >> $GITHUB_OUTPUT; fi
-            echo "Latest: $LATEST Current: ${CURRENT:-<none>}"
+            echo "Resolved Roslyn package version -> Latest: $LATEST Current: ${CURRENT:-<none>}"
 
       - name: Stop if version already current
         if: steps.version.outputs.up_to_date == 'true'
