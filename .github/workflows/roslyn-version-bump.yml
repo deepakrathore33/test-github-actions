@@ -62,7 +62,7 @@ jobs:
         if: steps.sha.outputs.no_change != 'true'
         id: changelog
         env:
-          LABEL: vscode
+          LABEL: VSCode
         run: |
           set -euo pipefail
           START="${{ steps.sha.outputs.start }}"
