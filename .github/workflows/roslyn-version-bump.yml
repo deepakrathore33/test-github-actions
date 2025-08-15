@@ -68,14 +68,11 @@ jobs:
             CMD+=(--label "$LABEL")
           fi
           echo "Running: ${CMD[*]}";
-          if ! OUTPUT=$("${CMD[@]}" 2>err.log); then
-            echo "::warning::pr-finder exited with non-zero status $?";
-            echo "---- pr-finder stderr ----"; sed 's/^/stderr: /' err.log || true; echo "---------------------------";
-            echo "(pr-finder failed)" > pr-changelog.txt
-          else
+          if OUTPUT=$("${CMD[@]}" 2>err.log); then
+            # Success path
             if [ -z "$OUTPUT" ]; then
               if [ -n "${LABEL:-}" ]; then
-                echo "::notice::No PRs found with label '$LABEL' in $START..$END. Falling back to all labels.";
+                echo "::notice::No PRs with label '$LABEL' in $START..$END. Trying without label.";
                 if OUTPUT_ALL=$(roslyn-tools pr-finder -s "$START" -e "$END" --format changelog 2>>err.log); then
                   if [ -z "$OUTPUT_ALL" ]; then
                     echo "(no matching PRs)" > pr-changelog.txt
@@ -83,7 +80,8 @@ jobs:
                     printf "%s\n" "$OUTPUT_ALL" > pr-changelog.txt
                   fi
                 else
-                  echo "::warning::Fallback pr-finder call failed.";
+                  rc=$?
+                  echo "::warning::Fallback pr-finder failed with exit code $rc";
                   echo "(pr-finder failed)" > pr-changelog.txt
                 fi
               else
@@ -92,9 +90,14 @@ jobs:
             else
               printf "%s\n" "$OUTPUT" > pr-changelog.txt
             fi
-            if [ -s err.log ]; then
-              echo "---- pr-finder stderr (non-fatal) ----"; sed 's/^/stderr: /' err.log || true; echo "--------------------------------------";
-            fi
+          else
+            rc=$?
+            echo "::warning::pr-finder primary call failed (exit $rc)";
+            echo "---- pr-finder stderr ----"; (sed 's/^/stderr: /' err.log || true); echo "--------------------------";
+            echo "(pr-finder failed)" > pr-changelog.txt
+          fi
+          if [ -s err.log ]; then
+            echo "---- pr-finder stderr summary ----"; (sed 's/^/stderr: /' err.log || true); echo "----------------------------------";
           fi
 
       - name: Update CHANGELOG
