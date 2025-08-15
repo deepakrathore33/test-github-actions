@@ -1,3 +1,9 @@
+### Roslyn bump 4.14.0 (2025-08-15)
+
+* Bump Roslyn to 4.14.0
+
+(pr-finder failed)
+
 ## Known Issues
 
 - Diagnostics related feature requests and improvements [#5951](https://github.com/dotnet/vscode-csharp/issues/5951)
