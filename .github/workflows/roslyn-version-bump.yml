@@ -169,23 +169,27 @@ jobs:
             try {
               // Update package.json first (like the manual PRs do)
               let pkgUpdated = false;
-              if (roslynVer !== 'unknown') {
-                try {
-                  const pkg = JSON.parse(await readFile('package.json', 'utf8'));
-                  if (!pkg.defaults) pkg.defaults = {};
-                  
-                  const oldVersion = pkg.defaults.roslyn;
-                  if (pkg.defaults.roslyn !== roslynVer) {
-                    core.info(`Updating package.json defaults.roslyn: ${oldVersion} -> ${roslynVer}`);
-                    pkg.defaults.roslyn = roslynVer;
-                    await writeFile('package.json', JSON.stringify(pkg, null, 2) + '\n');
-                    pkgUpdated = true;
-                  } else {
-                    core.info('package.json defaults.roslyn already up to date');
-                  }
-                } catch (err) {
-                  core.warning(`Could not update package.json: ${err.message}`);
+              try {
+                const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+                if (!pkg.defaults) pkg.defaults = {};
+                
+                const oldVersion = pkg.defaults.roslyn;
+                core.info(`Current package.json defaults.roslyn: ${oldVersion}`);
+                core.info(`Detected Roslyn version: ${roslynVer}`);
+                
+                // Always update package.json, even if version is 'unknown'
+                if (pkg.defaults.roslyn !== roslynVer) {
+                  core.info(`Updating package.json defaults.roslyn: ${oldVersion} -> ${roslynVer}`);
+                  pkg.defaults.roslyn = roslynVer;
+                  await writeFile('package.json', JSON.stringify(pkg, null, 2) + '\n');
+                  pkgUpdated = true;
+                  core.info('package.json successfully updated');
+                } else {
+                  core.info('package.json defaults.roslyn already up to date');
                 }
+              } catch (err) {
+                core.error(`Could not update package.json: ${err.message}`);
+                core.setFailed(`Failed to update package.json: ${err.message}`);
               }
               
               // Load pr-finder output and filter out diff link
