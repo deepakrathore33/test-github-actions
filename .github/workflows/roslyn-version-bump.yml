@@ -25,24 +25,22 @@ jobs:
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Clone roslyn & compute range
-        id: sha
+      - name: Clone roslyn & pick last commit range
+        id: range
         run: |
           set -euo pipefail
-          git clone --no-tags --filter=blob:none --depth 200 https://github.com/dotnet/roslyn.git roslyn
-          # Hardcoded commit range per request
-          START=498e8d399b4911bdaec79664651ca29aaf2a66b9
-          END=7c7cfd9c3fee9f3be48c1f8b7f1d139cfb3f5942
-          echo "Using hardcoded start: $START"
-          echo "Using hardcoded end:   $END"
+          git clone --depth 2 https://github.com/dotnet/roslyn.git roslyn
+          pushd roslyn >/dev/null
+          END=$(git rev-parse HEAD)
+          START=$(git rev-parse HEAD~1 || echo $END)
+          popd >/dev/null
           echo "start=$START" >> $GITHUB_OUTPUT
           echo "end=$END" >> $GITHUB_OUTPUT
           if [ "$START" = "$END" ]; then echo "no_change=true" >> $GITHUB_OUTPUT; fi
-          echo "End commit: $END"
 
       - name: Determine Roslyn version
         id: rver
-        if: steps.sha.outputs.no_change != 'true'
+        if: steps.range.outputs.no_change != 'true'
         run: |
           set -euo pipefail
           pushd roslyn >/dev/null
@@ -57,213 +55,80 @@ jobs:
             VER=$(grep -oP 'Microsoft.CodeAnalysis.Common" Version="\K[^" ]+' build/Targets/Packages.props | head -n1 || true)
           fi
           popd >/dev/null
-          if [ -z "$VER" ]; then
-            echo "Roslyn version not found";
-            VER=unknown
-          else
-            echo "Detected Roslyn version: $VER"
-          fi
+          [ -z "$VER" ] && VER=unknown
           echo "roslyn=$VER" >> $GITHUB_OUTPUT
 
-      - name: Stop if no new commit
-        if: steps.sha.outputs.no_change == 'true'
-        run: echo "No new Roslyn commit since last run."
-
-      - name: Auth settings
-        if: steps.sha.outputs.no_change != 'true'
-        run: |
-          mkdir -p $HOME/.roslyn-tools
-          JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken": ""}' "${{ secrets.GITHUB_TOKEN }}")
-          printf '%s' "$JSON" | base64 | tr -d '\n' > $HOME/.roslyn-tools/settings
-
-      - name: Generate PR list (label filtered)
-        if: steps.sha.outputs.no_change != 'true'
-        id: changelog
-        env:
-          LABEL: VSCode
+      - name: Generate PR list
+        id: prs
+        if: steps.range.outputs.no_change != 'true'
         run: |
           set -euo pipefail
-          START="${{ steps.sha.outputs.start }}"
-          END="${{ steps.sha.outputs.end }}"
-          # Run inside the roslyn clone so pr-finder can access repo metadata
           pushd roslyn >/dev/null
-          CMD=(roslyn-tools pr-finder -s "$START" -e "$END" --format changelog)
-          if [ -n "${LABEL:-}" ]; then
-            CMD+=(--label "$LABEL")
-          fi
-          echo "Running: ${CMD[*]}";
-          if OUTPUT=$("${CMD[@]}" 2>err.log); then
-            # Success path
-            if [ -z "$OUTPUT" ]; then
-              if [ -n "${LABEL:-}" ]; then
-                echo "::notice::No PRs with label '$LABEL' in $START..$END. Trying without label.";
-                if OUTPUT_ALL=$(roslyn-tools pr-finder -s "$START" -e "$END" --format changelog 2>>err.log); then
-                  if [ -z "$OUTPUT_ALL" ]; then
-                    echo "(no matching PRs)" > pr-changelog.txt
-                  else
-                    printf "%s\n" "$OUTPUT_ALL" > pr-changelog.txt
-                  fi
-                else
-                  rc=$?
-                  echo "::warning::Fallback pr-finder failed with exit code $rc";
-                  echo "(pr-finder failed)" > pr-changelog.txt
-                fi
-              else
-                echo "(no matching PRs)" > pr-changelog.txt
-              fi
-            else
-              printf "%s\n" "$OUTPUT" > pr-changelog.txt
-            fi
+          if OUTPUT=$(roslyn-tools pr-finder -s "${{ steps.range.outputs.start }}" -e "${{ steps.range.outputs.end }}" --format changelog 2>/dev/null); then
+            [ -z "$OUTPUT" ] && echo "(no PRs)" > ../pr-changelog.txt || printf "%s\n" "$OUTPUT" > ../pr-changelog.txt
           else
-            rc=$?
-            if [ ! -s err.log ]; then
-              echo "::notice::pr-finder exited $rc with no stderr; assuming no matches.";
-              echo "(no matching PRs)" > pr-changelog.txt
-            else
-              echo "::warning::pr-finder primary call failed (exit $rc)";
-              echo "---- pr-finder stderr ----"; (sed 's/^/stderr: /' err.log || true); echo "--------------------------";
-              echo "(pr-finder failed)" > pr-changelog.txt
-            fi
-          fi
-          if [ -s err.log ]; then
-            echo "---- pr-finder stderr summary ----"; (sed 's/^/stderr: /' err.log || true); echo "----------------------------------";
+            echo "(pr-finder failed)" > ../pr-changelog.txt
           fi
           popd >/dev/null
-          # Move result file out if created inside roslyn (we wrote to ../ since we stayed in clone when redirecting)
-          if [ -f roslyn/pr-changelog.txt ] && [ ! -f pr-changelog.txt ]; then
-            mv roslyn/pr-changelog.txt pr-changelog.txt || true
-          fi
-      - name: "Fallback: derive VSCode PRs via commit scan & API"
-        if: steps.sha.outputs.no_change != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LABEL_FILTER: VSCode
-        run: |
-          set -euo pipefail
-          if ! grep -qE '^(\(no matching PRs\)|\(pr-finder failed\))$' pr-changelog.txt; then
-            echo "Primary pr-finder produced data; skipping fallback."; exit 0; fi
-          START="${{ steps.sha.outputs.start }}"; END="${{ steps.sha.outputs.end }}";
-          echo "Running fallback commit scan for range $START..$END";
-          pushd roslyn >/dev/null
-          git log --pretty=%s "$START".."$END" | grep -o '#[0-9]\+' | tr -d '#' | sort -u > ../pr_numbers.txt || true
-          popd >/dev/null
-            if [ ! -s pr_numbers.txt ]; then echo "No PR number patterns found in commit messages."; exit 0; fi
-          echo "Found candidate PR numbers:"; cat pr_numbers.txt
-          : > pr-fallback.txt
-          while read -r NUM; do
-            RESP=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/dotnet/roslyn/pulls/$NUM" || true)
-            # Skip if not a PR JSON
-            echo "$RESP" | grep -q '"number"' || continue
-            # Require merged
-            echo "$RESP" | grep -q '"merged_at": *null' && continue
-            # Require label (case-insensitive exact match)
-            echo "$RESP" | grep -i '"name": *"'${LABEL_FILTER}'"' || continue
-            TITLE=$(echo "$RESP" | grep '"title"' | head -n1 | sed 's/.*"title": *"//; s/",*$//')
-            echo "* $TITLE (#$NUM)" >> pr-fallback.txt
-          done < pr_numbers.txt
-          if [ -s pr-fallback.txt ]; then
-            echo "Fallback found $(wc -l < pr-fallback.txt) VSCode PR(s).";
-            mv pr-fallback.txt pr-changelog.txt
-          else
-            echo "Fallback found no VSCode-labeled merged PRs.";
-          fi
+          cat pr-changelog.txt
+          if grep -qE '^\((no PRs|pr-finder failed)\)$' pr-changelog.txt; then echo "empty=true" >> $GITHUB_OUTPUT; fi
 
-      - name: Detect empty changelog
-        if: steps.sha.outputs.no_change != 'true'
-        id: empty
-        run: |
-          if grep -qE '^(\(no matching PRs\)|\(pr-finder failed\))$' pr-changelog.txt; then
-            echo "No PR content to create a PR for.";
-            echo "empty=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update CHANGELOG
-        if: steps.sha.outputs.no_change != 'true'
+      - name: Update CHANGELOG & bump version
+        id: update
+        if: steps.range.outputs.no_change != 'true' && steps.prs.outputs.empty != 'true'
         run: |
           set -euo pipefail
           DATE=$(date -u +%Y-%m-%d)
-          RANGE_HEADER="### Roslyn changes (${DATE})"
-          DIFF_URL="https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.start }}...${{ steps.sha.outputs.end }}?w=1"
           ROSLYN_VER="${{ steps.rver.outputs.roslyn }}"
-          PKG_VER_LINE="Extension package version: (pending bump)"
           if [ -f package.json ]; then
-            CURR=$(jq -r .version package.json 2>/dev/null || echo '')
-            PKG_VER_LINE="Extension package version: ${CURR}"
+            CURR=$(jq -r .version package.json)
+            if echo "$CURR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              MAJOR=${CURR%%.*}; REST=${CURR#*.}; MINOR=${REST%%.*}; PATCH=${CURR##*.}; NEW_VER="$MAJOR.$MINOR.$((PATCH+1))"
+            else
+              NEW_VER="0.1.0"
+            fi
+            if [ "$ROSLYN_VER" != "unknown" ]; then
+              jq ".version=\"$NEW_VER\" | .defaults.roslyn=\"$ROSLYN_VER\"" package.json > _tmp && mv _tmp package.json
+            else
+              jq ".version=\"$NEW_VER\"" package.json > _tmp && mv _tmp package.json
+            fi
           fi
+          RANGE_HEADER="### Roslyn changes ($DATE)"
+          DIFF_URL="https://github.com/dotnet/roslyn/compare/${{ steps.range.outputs.start }}...${{ steps.range.outputs.end }}?w=1"
+          PKG_VER_LINE="Extension package version: $(jq -r .version package.json 2>/dev/null || echo unknown)"
           BUMP_LINE="* Bump Roslyn to ${ROSLYN_VER}"
-          if [ "$ROSLYN_VER" = "unknown" ]; then BUMP_LINE="* Bump Roslyn (version unresolved)"; fi
-          { echo "$RANGE_HEADER"; echo; echo "Range: ${{ steps.sha.outputs.start }}...${{ steps.sha.outputs.end }}"; echo "Diff: $DIFF_URL"; echo "PR: PR_LINK_PLACEHOLDER"; echo "$BUMP_LINE"; echo "$PKG_VER_LINE"; echo; echo "#### PRs"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG.md 2>/dev/null > _tmp && mv _tmp CHANGELOG.md
-          echo "Changelog updated."
-
-      - name: Bump package.json version
-        if: steps.sha.outputs.no_change != 'true'
-        id: bumpver
-        run: |
-          set -euo pipefail
-          if [ ! -f package.json ]; then echo "No package.json present"; exit 0; fi
-          CURR=$(jq -r .version package.json)
-          if echo "$CURR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            MAJOR=$(echo $CURR | cut -d. -f1)
-            MINOR=$(echo $CURR | cut -d. -f2)
-            PATCH=$(echo $CURR | cut -d. -f3)
-            NEW_VER="$MAJOR.$MINOR.$((PATCH+1))"
-          elif echo "$CURR" | grep -Eq 'placeholder$'; then
-            NEW_VER="0.1.0"
-          else
-            # Fallback: append .1
-            NEW_VER="${CURR%.}.1"
-          fi
-          echo "Bumping version: $CURR -> $NEW_VER"
-          ROSLYN_VER="${{ steps.rver.outputs.roslyn }}"
-          if [ "$ROSLYN_VER" != "unknown" ]; then
-            jq ".version=\"$NEW_VER\" | .defaults.roslyn=\"$ROSLYN_VER\"" package.json > _tmp && mv _tmp package.json
-          else
-            jq ".version=\"$NEW_VER\"" package.json > _tmp && mv _tmp package.json
-          fi
-          echo "new_version=$NEW_VER" >> $GITHUB_OUTPUT
-          # Update the top section's Version line if present
-          if grep -q 'Extension package version:' CHANGELOG.md; then
-            sed -i "0,/Extension package version:/s//Extension package version: $NEW_VER/" CHANGELOG.md
-          fi
-
-      - name: Store last processed commit
-        if: steps.sha.outputs.no_change != 'true'
-        run: echo "${{ steps.sha.outputs.end }}" > .github/roslyn-last-sha.txt
-
-      - name: Cleanup clone
-        if: steps.sha.outputs.no_change != 'true'
-        run: rm -rf roslyn || true
+          { echo "$RANGE_HEADER"; echo; echo "Range: ${{ steps.range.outputs.start }}...${{ steps.range.outputs.end }}"; echo "Diff: $DIFF_URL"; echo "PR: PR_LINK_PLACEHOLDER"; echo "$BUMP_LINE"; echo "$PKG_VER_LINE"; echo; echo "#### PRs"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG.md 2>/dev/null > _tmp && mv _tmp CHANGELOG.md
 
       - name: Create PR
-        if: steps.sha.outputs.no_change != 'true' && steps.empty.outputs.empty != 'true'
+        if: steps.range.outputs.no_change != 'true' && steps.prs.outputs.empty != 'true'
         id: cpr
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: roslyn-changes/${{ steps.sha.outputs.end }}
-          commit-message: "Roslyn changes: ${{ steps.sha.outputs.start }}...${{ steps.sha.outputs.end }}"
-          title: "Roslyn changes: ${{ steps.sha.outputs.end }}"
+          branch: roslyn-changes/${{ steps.range.outputs.end }}
+          commit-message: "Roslyn changes: ${{ steps.range.outputs.start }}...${{ steps.range.outputs.end }}"
+          title: "Roslyn changes: ${{ steps.range.outputs.end }}"
+          add-paths: |
+            CHANGELOG.md
+            package.json
           body: |
-            Automated Roslyn commit-range changelog.
-            Range: `${{ steps.sha.outputs.start }}` ... `${{ steps.sha.outputs.end }}`
-            Label filter: VSCode
-            See CHANGELOG.md for details.
-
+            Automated Roslyn update.
+            Range: `${{ steps.range.outputs.start }}` ... `${{ steps.range.outputs.end }}`.
+            See CHANGELOG.md.
       - name: Backfill PR link in CHANGELOG
-        if: steps.cpr.outputs.pull-request-number && steps.sha.outputs.no_change != 'true' && steps.empty.outputs.empty != 'true'
+        if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true' && steps.prs.outputs.empty != 'true'
         run: |
           set -euo pipefail
           PR_URL="${{ steps.cpr.outputs.pull-request-url }}"
-            PR_NUM="${{ steps.cpr.outputs.pull-request-number }}"
-          BRANCH="roslyn-changes/${{ steps.sha.outputs.end }}"
+          PR_NUM="${{ steps.cpr.outputs.pull-request-number }}"
+          BRANCH="roslyn-changes/${{ steps.range.outputs.end }}"
           git fetch origin "$BRANCH" --depth=1
           git checkout "$BRANCH"
-          # Replace placeholder
-          sed -i "0,/PR_LINK_PLACEHOLDER/s//#$PR_NUM ($PR_URL)/" CHANGELOG.md
+          sed -i "0,/PR_LINK_PLACEHOLDER/{s|PR_LINK_PLACEHOLDER|#$PR_NUM ($PR_URL)|}" CHANGELOG.md
           if git diff --quiet; then
-            echo "No placeholder replacement occurred."; exit 0; fi
+            echo "No placeholder replaced (already filled?)."; exit 0; fi
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add CHANGELOG.md package.json || true
-          git commit -m "Backfill PR link #$PR_NUM and version ${{ steps.bumpver.outputs.new_version }}"
+          git commit -m "Backfill PR link #$PR_NUM and version ${{ steps.update.outputs.new_version }}"
           git push origin "$BRANCH"
