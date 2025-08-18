@@ -128,21 +128,11 @@ jobs:
             let prLines = [];
             if (fs.existsSync(prFile)) {
               const raw = fs.readFileSync(prFile,'utf8').split(/\r?\n/).filter(l=>l.trim());
-              for (const line of raw) {
-                if (/^\((no PRs|pr-finder failed)\)$/.test(line)) continue; // skip sentinel
-                // Normalize to leading *
-                let norm = line.startsWith('*') ? line : `* ${line}`;
-                const m = norm.match(/\(#(\d+)\)/);
-                if (m) {
-                  const num = m[1];
-                  // Extract title without trailing (#num)
-                  const title = norm.replace(/^\*\s*/,'').replace(/\s*\(#\d+\).*$/,'');
-                  norm = `* ${title} (PR: [#${num}](https://github.com/dotnet/roslyn/pull/${num}))`;
-                }
-                prLines.push(norm);
-              }
+              prLines = raw
+                .filter(l => !/^\((no PRs|pr-finder failed)\)$/.test(l))
+                .map(l => l.startsWith('*') ? l : `* ${l}`);
             }
-            // De-duplicate while preserving order
+            // Minimal de-duplication while preserving order
             const seen = new Set();
             prLines = prLines.filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
             const CHANGELOG = 'CHANGELOG.md';
@@ -158,7 +148,7 @@ jobs:
             let endIdx = changelog.indexOf('\n# ', startIdx + headerLine.length);
             if (endIdx === -1) endIdx = changelog.length;
             let section = changelog.substring(startIdx, endIdx);
-            section = section.split(/\n/).filter(l => !/^\* Bump Roslyn to /.test(l)).join('\n');
+            section = section.split(/\n/).filter(l => !/^\* Bump Roslyn( to .*?)? \(PR: /.test(l)).join('\n');
             const bumpLine = roslynVer === 'unknown'
               ? '* Bump Roslyn (version unresolved) (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))'
               : `* Bump Roslyn to ${roslynVer} (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))`;
@@ -174,7 +164,9 @@ jobs:
             }
             section = lines.join('\n');
             const newChangelog = changelog.substring(0, startIdx) + section + changelog.substring(endIdx);
-            fs.writeFileSync(CHANGELOG, newChangelog.replace(/\n{3,}/g,'\n\n'));
+            let output = newChangelog.replace(/\n{3,}/g,'\n\n');
+            output = output.replace(/\s+$/,'\n'); // ensure single trailing newline, trim excess bottom space
+            fs.writeFileSync(CHANGELOG, output);
             core.setOutput('pkg_updated', String(pkgUpdated));
 
       - name: Create PR
