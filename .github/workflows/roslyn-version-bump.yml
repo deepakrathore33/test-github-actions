@@ -40,6 +40,31 @@ jobs:
           if [ "$START" = "$END" ]; then echo "no_change=true" >> $GITHUB_OUTPUT; fi
           echo "End commit: $END"
 
+      - name: Determine Roslyn version
+        id: rver
+        if: steps.sha.outputs.no_change != 'true'
+        run: |
+          set -euo pipefail
+          pushd roslyn >/dev/null
+          VER=""
+          if [ -f eng/Version.Details.xml ]; then
+            VER=$(grep -oP 'Microsoft.CodeAnalysis.Common" Version="\K[^" ]+' eng/Version.Details.xml | head -n1 || true)
+          fi
+          if [ -z "$VER" ] && [ -f eng/Versions.props ]; then
+            VER=$(grep -oP '<MicrosoftCodeAnalysisVersion>\K[^<]+' eng/Versions.props | head -n1 || true)
+          fi
+          if [ -z "$VER" ] && [ -f build/Targets/Packages.props ]; then
+            VER=$(grep -oP 'Microsoft.CodeAnalysis.Common" Version="\K[^" ]+' build/Targets/Packages.props | head -n1 || true)
+          fi
+          popd >/dev/null
+          if [ -z "$VER" ]; then
+            echo "Roslyn version not found";
+            VER=unknown
+          else
+            echo "Detected Roslyn version: $VER"
+          fi
+          echo "roslyn=$VER" >> $GITHUB_OUTPUT
+
       - name: Stop if no new commit
         if: steps.sha.outputs.no_change == 'true'
         run: echo "No new Roslyn commit since last run."
@@ -159,8 +184,47 @@ jobs:
           DATE=$(date -u +%Y-%m-%d)
           RANGE_HEADER="### Roslyn changes (${DATE})"
           DIFF_URL="https://github.com/dotnet/roslyn/compare/${{ steps.sha.outputs.start }}...${{ steps.sha.outputs.end }}?w=1"
-          { echo "$RANGE_HEADER"; echo; echo "Range: ${{ steps.sha.outputs.start }}...${{ steps.sha.outputs.end }}"; echo "Diff: $DIFF_URL"; echo; echo "#### PRs"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG.md 2>/dev/null > _tmp && mv _tmp CHANGELOG.md
+          ROSLYN_VER="${{ steps.rver.outputs.roslyn }}"
+          PKG_VER_LINE="Extension package version: (pending bump)"
+          if [ -f package.json ]; then
+            CURR=$(jq -r .version package.json 2>/dev/null || echo '')
+            PKG_VER_LINE="Extension package version: ${CURR}"
+          fi
+          BUMP_LINE="* Bump Roslyn to ${ROSLYN_VER}"
+          if [ "$ROSLYN_VER" = "unknown" ]; then BUMP_LINE="* Bump Roslyn (version unresolved)"; fi
+          { echo "$RANGE_HEADER"; echo; echo "Range: ${{ steps.sha.outputs.start }}...${{ steps.sha.outputs.end }}"; echo "Diff: $DIFF_URL"; echo "PR: PR_LINK_PLACEHOLDER"; echo "$BUMP_LINE"; echo "$PKG_VER_LINE"; echo; echo "#### PRs"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG.md 2>/dev/null > _tmp && mv _tmp CHANGELOG.md
           echo "Changelog updated."
+
+      - name: Bump package.json version
+        if: steps.sha.outputs.no_change != 'true'
+        id: bumpver
+        run: |
+          set -euo pipefail
+          if [ ! -f package.json ]; then echo "No package.json present"; exit 0; fi
+          CURR=$(jq -r .version package.json)
+          if echo "$CURR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            MAJOR=$(echo $CURR | cut -d. -f1)
+            MINOR=$(echo $CURR | cut -d. -f2)
+            PATCH=$(echo $CURR | cut -d. -f3)
+            NEW_VER="$MAJOR.$MINOR.$((PATCH+1))"
+          elif echo "$CURR" | grep -Eq 'placeholder$'; then
+            NEW_VER="0.1.0"
+          else
+            # Fallback: append .1
+            NEW_VER="${CURR%.}.1"
+          fi
+          echo "Bumping version: $CURR -> $NEW_VER"
+          ROSLYN_VER="${{ steps.rver.outputs.roslyn }}"
+          if [ "$ROSLYN_VER" != "unknown" ]; then
+            jq ".version=\"$NEW_VER\" | .defaults.roslyn=\"$ROSLYN_VER\"" package.json > _tmp && mv _tmp package.json
+          else
+            jq ".version=\"$NEW_VER\"" package.json > _tmp && mv _tmp package.json
+          fi
+          echo "new_version=$NEW_VER" >> $GITHUB_OUTPUT
+          # Update the top section's Version line if present
+          if grep -q 'Extension package version:' CHANGELOG.md; then
+            sed -i "0,/Extension package version:/s//Extension package version: $NEW_VER/" CHANGELOG.md
+          fi
 
       - name: Store last processed commit
         if: steps.sha.outputs.no_change != 'true'
@@ -172,6 +236,7 @@ jobs:
 
       - name: Create PR
         if: steps.sha.outputs.no_change != 'true' && steps.empty.outputs.empty != 'true'
+        id: cpr
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -183,3 +248,22 @@ jobs:
             Range: `${{ steps.sha.outputs.start }}` ... `${{ steps.sha.outputs.end }}`
             Label filter: VSCode
             See CHANGELOG.md for details.
+
+      - name: Backfill PR link in CHANGELOG
+        if: steps.cpr.outputs.pull-request-number && steps.sha.outputs.no_change != 'true' && steps.empty.outputs.empty != 'true'
+        run: |
+          set -euo pipefail
+          PR_URL="${{ steps.cpr.outputs.pull-request-url }}"
+            PR_NUM="${{ steps.cpr.outputs.pull-request-number }}"
+          BRANCH="roslyn-changes/${{ steps.sha.outputs.end }}"
+          git fetch origin "$BRANCH" --depth=1
+          git checkout "$BRANCH"
+          # Replace placeholder
+          sed -i "0,/PR_LINK_PLACEHOLDER/s//#$PR_NUM ($PR_URL)/" CHANGELOG.md
+          if git diff --quiet; then
+            echo "No placeholder replacement occurred."; exit 0; fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add CHANGELOG.md package.json || true
+          git commit -m "Backfill PR link #$PR_NUM and version ${{ steps.bumpver.outputs.new_version }}"
+          git push origin "$BRANCH"
