@@ -59,6 +59,54 @@ jobs:
           
           echo "Auth settings file created at $HOME/.roslyn-tools/settings"
 
+      - name: Determine Roslyn version from changes
+        id: rver
+        if: steps.range.outputs.no_change != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pushd roslyn >/dev/null
+          
+          VER=""
+          echo "Attempting to detect Roslyn version from commit range..."
+          
+          # Checkout the END commit to get the latest version
+          git checkout "${{ steps.range.outputs.end }}" >/dev/null 2>&1
+          
+          # Primary method: Check eng/Version.Details.xml for Microsoft.CodeAnalysis.Common
+          if [ -f eng/Version.Details.xml ] && [ -z "$VER" ]; then
+            echo "Checking eng/Version.Details.xml for Microsoft.CodeAnalysis.Common"
+            VER=$(xmllint --xpath "//Dependency[@Name='Microsoft.CodeAnalysis.Common']/@Version" eng/Version.Details.xml 2>/dev/null | sed 's/Version="//' | sed 's/"//' || true)
+            if [ -z "$VER" ]; then
+              # Fallback: use grep if xmllint not available
+              VER=$(grep -A1 -B1 'Microsoft.CodeAnalysis.Common' eng/Version.Details.xml | grep 'Version=' | grep -oE 'Version="[^"]+' | cut -d '"' -f2 | head -n1 || true)
+            fi
+          fi
+          
+          # Secondary method: Check eng/Versions.props
+          if [ -f eng/Versions.props ] && [ -z "$VER" ]; then
+            echo "Checking eng/Versions.props for MicrosoftCodeAnalysisVersion"
+            VER=$(grep -oP '<MicrosoftCodeAnalysisVersion>\K[^<]+' eng/Versions.props | head -n1 || true)
+          fi
+          
+          # Tertiary method: Check Directory.Packages.props 
+          if [ -f Directory.Packages.props ] && [ -z "$VER" ]; then
+            echo "Checking Directory.Packages.props for Microsoft.CodeAnalysis.Common"
+            VER=$(grep 'Microsoft.CodeAnalysis.Common' Directory.Packages.props | grep -oP 'Version="\K[^"]+' | head -n1 || true)
+          fi
+          
+          # Final fallback: Search git log for version bump commits
+          if [ -z "$VER" ]; then
+            echo "Fallback: searching commit messages for version patterns"
+            VER=$(git log --oneline "${{ steps.range.outputs.start }}..${{ steps.range.outputs.end }}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+          fi
+          
+          echo "Detected Roslyn version: ${VER:-unknown}"
+          popd >/dev/null
+          
+          [ -z "$VER" ] && VER=unknown
+          echo "roslyn=$VER" >> $GITHUB_OUTPUT
+
       - name: Generate PR list
         id: prs
         if: steps.range.outputs.no_change != 'true'
@@ -88,6 +136,8 @@ jobs:
         id: update
         if: steps.range.outputs.no_change != 'true'
         uses: actions/github-script@v7
+        env:
+          ROSLYN_VER: ${{ steps.rver.outputs.roslyn }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -96,8 +146,31 @@ jobs:
             
             const CHANGELOG = 'CHANGELOG.md';
             const PR_FILE = 'pr-changelog.txt';
+            const roslynVer = process.env.ROSLYN_VER || 'unknown';
             
-            core.info('Updating CHANGELOG.md with Roslyn changes');
+            core.info(`Updating CHANGELOG.md with Roslyn changes (version: ${roslynVer})`);
+            
+            try {
+              // Update package.json first (like the manual PRs do)
+              let pkgUpdated = false;
+              if (roslynVer !== 'unknown') {
+                try {
+                  const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+                  if (!pkg.defaults) pkg.defaults = {};
+                  
+                  const oldVersion = pkg.defaults.roslyn;
+                  if (pkg.defaults.roslyn !== roslynVer) {
+                    core.info(`Updating package.json defaults.roslyn: ${oldVersion} -> ${roslynVer}`);
+                    pkg.defaults.roslyn = roslynVer;
+                    await writeFile('package.json', JSON.stringify(pkg, null, 2) + '\n');
+                    pkgUpdated = true;
+                  } else {
+                    core.info('package.json defaults.roslyn already up to date');
+                  }
+                } catch (err) {
+                  core.warning(`Could not update package.json: ${err.message}`);
+                }
+              }
             
             try {
               // Load pr-finder output and filter out diff link
@@ -124,32 +197,52 @@ jobs:
                 return;
               }
               
-              // Find the existing bump line pattern in # 2.89.x section
+              // Find the existing bump line pattern in the first # section
               const lines = content.split(/\r?\n/);
               let bumpLineIndex = -1;
-              let inCorrectSection = false;
+              let firstHeaderIndex = -1;
               
+              // Find the first # header
               for (let i = 0; i < lines.length; i++) {
-                if (/^# 2\.89\./.test(lines[i])) {
-                  inCorrectSection = true;
-                  continue;
+                if (/^# /.test(lines[i])) {
+                  firstHeaderIndex = i;
+                  break;
                 }
-                if (/^# /.test(lines[i]) && inCorrectSection) {
-                  break; // End of 2.89.x section
+              }
+              
+              if (firstHeaderIndex === -1) {
+                core.setFailed('Could not find any # header in CHANGELOG.md');
+                return;
+              }
+              
+              // Find the next # header to determine the end of the first section
+              let sectionEndIndex = lines.length;
+              for (let i = firstHeaderIndex + 1; i < lines.length; i++) {
+                if (/^# /.test(lines[i])) {
+                  sectionEndIndex = i;
+                  break;
                 }
-                if (inCorrectSection && /^\* Bump Roslyn to .* \(PR:/.test(lines[i])) {
+              }
+              
+              // Look for "Bump Roslyn" line within the first section
+              for (let i = firstHeaderIndex + 1; i < sectionEndIndex; i++) {
+                if (/^\* Bump Roslyn to .* \(PR:/.test(lines[i])) {
                   bumpLineIndex = i;
                   break;
                 }
               }
               
               if (bumpLineIndex === -1) {
-                core.setFailed('Could not find existing Roslyn bump line in # 2.89.x section');
+                core.setFailed('Could not find existing Roslyn bump line in the first section');
                 return;
               }
               
-              // Replace the existing bump line with placeholder version
-              lines[bumpLineIndex] = '* Bump Roslyn to 5.0.0-2.25412.5 (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))';
+              // Replace the existing bump line with detected version or placeholder
+              const bumpLine = roslynVer === 'unknown' 
+                ? '* Bump Roslyn (version unresolved) (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))'
+                : `* Bump Roslyn to ${roslynVer} (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))`;
+              
+              lines[bumpLineIndex] = bumpLine;
               
               // Find where existing sub-bullets end (don't remove them, just find the insertion point)
               let insertionPoint = bumpLineIndex + 1;
@@ -181,6 +274,7 @@ jobs:
           title: "Roslyn changes: ${{ steps.range.outputs.end }}"
           add-paths: |
             CHANGELOG.md
+            package.json
           body: |
             Automated Roslyn update.
             Range: `${{ steps.range.outputs.start }}` ... `${{ steps.range.outputs.end }}`.
@@ -209,6 +303,6 @@ jobs:
           
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add CHANGELOG.md || true
+          git add CHANGELOG.md package.json || true
           git commit -m "Backfill PR link #$PR_NUM"
           git push origin "$BRANCH"
