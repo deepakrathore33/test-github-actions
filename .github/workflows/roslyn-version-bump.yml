@@ -151,19 +151,15 @@ jobs:
               // Replace the existing bump line with placeholder version
               lines[bumpLineIndex] = '* Bump Roslyn to 5.0.0-2.25412.5 (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))';
               
-              // Remove any existing sub-bullets after the bump line
-              let removeStart = bumpLineIndex + 1;
-              while (removeStart < lines.length && lines[removeStart].startsWith('  *')) {
-                removeStart++;
-              }
-              const removeCount = removeStart - bumpLineIndex - 1;
-              if (removeCount > 0) {
-                lines.splice(bumpLineIndex + 1, removeCount);
+              // Find where existing sub-bullets end (don't remove them, just find the insertion point)
+              let insertionPoint = bumpLineIndex + 1;
+              while (insertionPoint < lines.length && lines[insertionPoint].startsWith('  *')) {
+                insertionPoint++;
               }
               
-              // Insert new PR lines after the bump line
+              // Insert new PR lines after existing sub-bullets
               if (prLines.length > 0) {
-                lines.splice(bumpLineIndex + 1, 0, ...prLines);
+                lines.splice(insertionPoint, 0, ...prLines);
               }
               
               const finalText = lines.join('\n');
