@@ -20,6 +20,7 @@ jobs:
           dotnet-version: 9.0.x
 
       - name: Install roslyn-tools
+        shell: bash
         run: |
           FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
@@ -27,41 +28,61 @@ jobs:
 
       - name: Clone roslyn & set hardcoded range
         id: range
+        shell: bash
         run: |
           set -euo pipefail
           git clone --no-tags --filter=blob:none --depth 500 https://github.com/dotnet/roslyn.git roslyn
+          
           # Hardcoded commit range per request
           START=498e8d399b4911bdaec79664651ca29aaf2a66b9
           END=7c7cfd9c3fee9f3be48c1f8b7f1d139cfb3f5942
+          
           echo "Using hardcoded start: $START"
           echo "Using hardcoded end:   $END"
+          
           echo "start=$START" >> $GITHUB_OUTPUT
           echo "end=$END" >> $GITHUB_OUTPUT
-          if [ "$START" = "$END" ]; then echo "no_change=true" >> $GITHUB_OUTPUT; fi
+          
+          if [ "$START" = "$END" ]; then 
+            echo "no_change=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Auth settings
         if: steps.range.outputs.no_change != 'true'
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.roslyn-tools"
+          
           JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "${{ secrets.GITHUB_TOKEN }}")
           printf '%s' "$JSON" | base64 | tr -d '\n' > "$HOME/.roslyn-tools/settings"
+          
           echo "Auth settings file created at $HOME/.roslyn-tools/settings"
 
       - name: Generate PR list
         id: prs
         if: steps.range.outputs.no_change != 'true'
+        shell: bash
         run: |
           set -euo pipefail
           pushd roslyn >/dev/null
+          
           if OUTPUT=$(roslyn-tools pr-finder -s "${{ steps.range.outputs.start }}" -e "${{ steps.range.outputs.end }}" --format changelog 2>/dev/null); then
-            [ -z "$OUTPUT" ] && echo "(no PRs)" > ../pr-changelog.txt || printf "%s\n" "$OUTPUT" > ../pr-changelog.txt
+            if [ -z "$OUTPUT" ]; then
+              echo "(no PRs)" > ../pr-changelog.txt
+            else
+              printf "%s\n" "$OUTPUT" > ../pr-changelog.txt
+            fi
           else
             echo "(pr-finder failed)" > ../pr-changelog.txt
           fi
+          
           popd >/dev/null
           cat pr-changelog.txt
-          if grep -qE '^\((no PRs|pr-finder failed)\)$' pr-changelog.txt; then echo "empty=true" >> $GITHUB_OUTPUT; fi
+          
+          if grep -qE '^\((no PRs|pr-finder failed)\)$' pr-changelog.txt; then 
+            echo "empty=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Update CHANGELOG
         id: update
@@ -70,41 +91,73 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs');
+            const { readFile, writeFile, access } = require('fs/promises');
+            const { constants } = require('fs');
+            
             const CHANGELOG = 'CHANGELOG.md';
             const PR_FILE = 'pr-changelog.txt';
-            const bumpLine = '* Roslyn changes (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))';
-            // Load pr-finder output (raw)
-            let prLines = [];
-            if (fs.existsSync(PR_FILE)) {
-              prLines = fs.readFileSync(PR_FILE,'utf8')
-                .split(/\r?\n/)
-                .map(l => l.trim())
-                .filter(l => l.length);
-            }
-            // Prepare existing changelog or seed
-            let content = fs.existsSync(CHANGELOG) ? fs.readFileSync(CHANGELOG,'utf8') : '# 2.x.x\n\n';
-            if (!/^# 2\./m.test(content)) content = '# 2.x.x\n\n' + content;
-            const lines = content.split(/\r?\n/);
-            const headerIndex = lines.findIndex(l => /^# 2\./.test(l));
-            if (headerIndex === -1) {
-              lines.unshift('# 2.x.x');
-            }
-            // Remove previous bump line if present
-            for (let i = lines.length -1; i >=0; i--) {
-              if (/^\* Roslyn changes \(PR: \[#ROSLYN_PR_NUMBER_PLACEHOLDER]/.test(lines[i])) {
-                lines.splice(i,1);
+            const bumpLine = '* Bump Roslyn to 5.0.0-2.25412.5 (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))';
+            
+            core.info('Updating CHANGELOG.md with Roslyn changes');
+            
+            try {
+              // Load pr-finder output and filter out diff link
+              let prLines = [];
+              try {
+                await access(PR_FILE, constants.F_OK);
+                const prContent = await readFile(PR_FILE, 'utf8');
+                prLines = prContent
+                  .split(/\r?\n/)
+                  .map(l => l.trim())
+                  .filter(l => l.length && !l.includes('[View Complete Diff of Changes]'));
+                core.info(`Found ${prLines.length} PR entries to add`);
+              } catch (err) {
+                core.warning(`Could not read ${PR_FILE}: ${err.message}`);
               }
+              
+              // Prepare existing changelog or create new one
+              let content;
+              try {
+                content = await readFile(CHANGELOG, 'utf8');
+              } catch (err) {
+                core.info('CHANGELOG.md not found, creating new one');
+                content = '# 2.x.x\n\n';
+              }
+              
+              if (!/^# 2\./m.test(content)) {
+                content = '# 2.x.x\n\n' + content;
+              }
+              
+              const lines = content.split(/\r?\n/);
+              const headerIndex = lines.findIndex(l => /^# 2\./.test(l));
+              if (headerIndex === -1) {
+                lines.unshift('# 2.x.x');
+              }
+              
+              // Remove previous bump line if present
+              for (let i = lines.length - 1; i >= 0; i--) {
+                if (/^\* (Roslyn changes|Bump Roslyn) \(PR: \[#ROSLYN_PR_NUMBER_PLACEHOLDER]/.test(lines[i])) {
+                  lines.splice(i, 1);
+                  core.info('Removed previous bump line');
+                }
+              }
+              
+              // Insert new bump + PR lines directly after header line
+              const hIdx = lines.findIndex(l => /^# 2\./.test(l));
+              const insertion = [bumpLine, ...prLines];
+              lines.splice(hIdx + 1, 0, ...insertion);
+              
+              // Collapse extra blank lines and ensure proper formatting
+              const finalText = lines.join('\n')
+                .replace(/\n{3,}/g, '\n\n')
+                .replace(/\s+$/, '') + '\n';
+              
+              await writeFile(CHANGELOG, finalText);
+              core.info('Successfully updated CHANGELOG.md');
+              
+            } catch (err) {
+              core.setFailed(`Error updating changelog: ${err?.message ?? err}`);
             }
-            // Insert new bump + PR lines directly after header line
-            const hIdx = lines.findIndex(l => /^# 2\./.test(l));
-            const insertion = [bumpLine, ...prLines];
-            lines.splice(hIdx + 1, 0, ...insertion);
-            // Collapse extra blank lines
-            let finalText = lines.join('\n')
-              .replace(/\n{3,}/g,'\n\n')
-              .replace(/\s+$/,'') + '\n';
-            fs.writeFileSync(CHANGELOG, finalText);
 
       - name: Create PR
         if: steps.range.outputs.no_change != 'true'
@@ -121,18 +174,28 @@ jobs:
             Automated Roslyn update.
             Range: `${{ steps.range.outputs.start }}` ... `${{ steps.range.outputs.end }}`.
             See CHANGELOG.md.
+            
       - name: Backfill PR link in CHANGELOG
         if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true'
+        shell: bash
         run: |
           set -euo pipefail
+          
           PR_URL="${{ steps.cpr.outputs.pull-request-url }}"
           PR_NUM="${{ steps.cpr.outputs.pull-request-number }}"
           BRANCH="roslyn-changes/${{ steps.range.outputs.end }}"
+          
           git fetch origin "$BRANCH" --depth=1
           git checkout "$BRANCH"
+          
           sed -i "0,/ROSLYN_PR_NUMBER_PLACEHOLDER/s/ROSLYN_PR_NUMBER_PLACEHOLDER/$PR_NUM/" CHANGELOG.md
           sed -i "0,/ROSLYN_PR_URL_PLACEHOLDER/s|ROSLYN_PR_URL_PLACEHOLDER|$PR_URL|" CHANGELOG.md
-          git diff --quiet && { echo "No placeholder replacement occurred."; exit 0; }
+          
+          if git diff --quiet; then
+            echo "No placeholder replacement occurred."
+            exit 0
+          fi
+          
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add CHANGELOG.md || true
