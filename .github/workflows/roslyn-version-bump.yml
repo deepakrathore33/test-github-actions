@@ -29,7 +29,7 @@ jobs:
         id: sha
         run: |
           set -euo pipefail
-          git clone --no-tags --depth 120 https://github.com/dotnet/roslyn.git roslyn
+          git clone --no-tags --filter=blob:none --depth 200 https://github.com/dotnet/roslyn.git roslyn
           END=$(git -C roslyn rev-parse HEAD)
           if [ -f .github/roslyn-last-sha.txt ]; then
             START=$(cat .github/roslyn-last-sha.txt)
@@ -41,6 +41,17 @@ jobs:
           if ! git -C roslyn cat-file -e "$START^{commit}" 2>/dev/null; then
             echo "Start commit $START not in shallow clone; fetching it";
             git -C roslyn fetch --no-tags origin "$START" || true
+          fi
+          if ! git -C roslyn merge-base --is-ancestor "$START" "$END" 2>/dev/null; then
+            echo "Start commit is not an ancestor of end; unshallowing to repair history";
+            if ! git -C roslyn fetch --prune --unshallow; then
+              echo "Unshallow failed; attempting large depth fetch";
+              git -C roslyn fetch --depth=10000 origin || true
+            fi
+          fi
+          if ! git -C roslyn merge-base --is-ancestor "$START" "$END" 2>/dev/null; then
+            echo "WARNING: Start commit still not ancestor after fetch; falling back to parent of END";
+            START=$(git -C roslyn rev-list --max-count=2 "$END" | tail -n1)
           fi
           echo "start=$START" >> $GITHUB_OUTPUT
           echo "end=$END" >> $GITHUB_OUTPUT
@@ -114,6 +125,40 @@ jobs:
           # Move result file out if created inside roslyn (we wrote to ../ since we stayed in clone when redirecting)
           if [ -f roslyn/pr-changelog.txt ] && [ ! -f pr-changelog.txt ]; then
             mv roslyn/pr-changelog.txt pr-changelog.txt || true
+          fi
+      - name: "Fallback: derive VSCode PRs via commit scan & API"
+        if: steps.sha.outputs.no_change != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LABEL_FILTER: VSCode
+        run: |
+          set -euo pipefail
+          if ! grep -qE '^(\(no matching PRs\)|\(pr-finder failed\))$' pr-changelog.txt; then
+            echo "Primary pr-finder produced data; skipping fallback."; exit 0; fi
+          START="${{ steps.sha.outputs.start }}"; END="${{ steps.sha.outputs.end }}";
+          echo "Running fallback commit scan for range $START..$END";
+          pushd roslyn >/dev/null
+          git log --pretty=%s "$START".."$END" | grep -o '#[0-9]\+' | tr -d '#' | sort -u > ../pr_numbers.txt || true
+          popd >/dev/null
+            if [ ! -s pr_numbers.txt ]; then echo "No PR number patterns found in commit messages."; exit 0; fi
+          echo "Found candidate PR numbers:"; cat pr_numbers.txt
+          : > pr-fallback.txt
+          while read -r NUM; do
+            RESP=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/dotnet/roslyn/pulls/$NUM" || true)
+            # Skip if not a PR JSON
+            echo "$RESP" | grep -q '"number"' || continue
+            # Require merged
+            echo "$RESP" | grep -q '"merged_at": *null' && continue
+            # Require label (case-insensitive exact match)
+            echo "$RESP" | grep -i '"name": *"'${LABEL_FILTER}'"' || continue
+            TITLE=$(echo "$RESP" | grep '"title"' | head -n1 | sed 's/.*"title": *"//; s/",*$//')
+            echo "* $TITLE (#$NUM)" >> pr-fallback.txt
+          done < pr_numbers.txt
+          if [ -s pr-fallback.txt ]; then
+            echo "Fallback found $(wc -l < pr-fallback.txt) VSCode PR(s).";
+            mv pr-fallback.txt pr-changelog.txt
+          else
+            echo "Fallback found no VSCode-labeled merged PRs.";
           fi
 
       - name: Detect empty changelog
