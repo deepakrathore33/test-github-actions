@@ -96,7 +96,6 @@ jobs:
             
             const CHANGELOG = 'CHANGELOG.md';
             const PR_FILE = 'pr-changelog.txt';
-            const bumpLine = '* Bump Roslyn to 5.0.0-2.25412.5 (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))';
             
             core.info('Updating CHANGELOG.md with Roslyn changes');
             
@@ -109,49 +108,65 @@ jobs:
                 prLines = prContent
                   .split(/\r?\n/)
                   .map(l => l.trim())
-                  .filter(l => l.length && !l.includes('[View Complete Diff of Changes]'));
+                  .filter(l => l.length && !l.includes('[View Complete Diff of Changes]'))
+                  .map(l => l.startsWith('*') ? `  ${l}` : `  * ${l}`); // Convert to sub-bullets
                 core.info(`Found ${prLines.length} PR entries to add`);
               } catch (err) {
                 core.warning(`Could not read ${PR_FILE}: ${err.message}`);
               }
               
-              // Prepare existing changelog or create new one
+              // Read existing changelog
               let content;
               try {
                 content = await readFile(CHANGELOG, 'utf8');
               } catch (err) {
-                core.info('CHANGELOG.md not found, creating new one');
-                content = '# 2.x.x\n\n';
+                core.setFailed('CHANGELOG.md not found');
+                return;
               }
               
-              if (!/^# 2\./m.test(content)) {
-                content = '# 2.x.x\n\n' + content;
-              }
-              
+              // Find the existing bump line pattern in # 2.89.x section
               const lines = content.split(/\r?\n/);
-              const headerIndex = lines.findIndex(l => /^# 2\./.test(l));
-              if (headerIndex === -1) {
-                lines.unshift('# 2.x.x');
-              }
+              let bumpLineIndex = -1;
+              let inCorrectSection = false;
               
-              // Remove previous bump line if present
-              for (let i = lines.length - 1; i >= 0; i--) {
-                if (/^\* (Roslyn changes|Bump Roslyn) \(PR: \[#ROSLYN_PR_NUMBER_PLACEHOLDER]/.test(lines[i])) {
-                  lines.splice(i, 1);
-                  core.info('Removed previous bump line');
+              for (let i = 0; i < lines.length; i++) {
+                if (/^# 2\.89\./.test(lines[i])) {
+                  inCorrectSection = true;
+                  continue;
+                }
+                if (/^# /.test(lines[i]) && inCorrectSection) {
+                  break; // End of 2.89.x section
+                }
+                if (inCorrectSection && /^\* Bump Roslyn to .* \(PR:/.test(lines[i])) {
+                  bumpLineIndex = i;
+                  break;
                 }
               }
               
-              // Insert new bump + PR lines directly after header line
-              const hIdx = lines.findIndex(l => /^# 2\./.test(l));
-              const insertion = [bumpLine, ...prLines];
-              lines.splice(hIdx + 1, 0, ...insertion);
+              if (bumpLineIndex === -1) {
+                core.setFailed('Could not find existing Roslyn bump line in # 2.89.x section');
+                return;
+              }
               
-              // Collapse extra blank lines and ensure proper formatting
-              const finalText = lines.join('\n')
-                .replace(/\n{3,}/g, '\n\n')
-                .replace(/\s+$/, '') + '\n';
+              // Replace the existing bump line with placeholder version
+              lines[bumpLineIndex] = '* Bump Roslyn to 5.0.0-2.25412.5 (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))';
               
+              // Remove any existing sub-bullets after the bump line
+              let removeStart = bumpLineIndex + 1;
+              while (removeStart < lines.length && lines[removeStart].startsWith('  *')) {
+                removeStart++;
+              }
+              const removeCount = removeStart - bumpLineIndex - 1;
+              if (removeCount > 0) {
+                lines.splice(bumpLineIndex + 1, removeCount);
+              }
+              
+              // Insert new PR lines after the bump line
+              if (prLines.length > 0) {
+                lines.splice(bumpLineIndex + 1, 0, ...prLines);
+              }
+              
+              const finalText = lines.join('\n');
               await writeFile(CHANGELOG, finalText);
               core.info('Successfully updated CHANGELOG.md');
               
@@ -174,7 +189,7 @@ jobs:
             Automated Roslyn update.
             Range: `${{ steps.range.outputs.start }}` ... `${{ steps.range.outputs.end }}`.
             See CHANGELOG.md.
-            
+
       - name: Backfill PR link in CHANGELOG
         if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true'
         shell: bash
