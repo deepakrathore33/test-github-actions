@@ -46,16 +46,30 @@ jobs:
           set -euo pipefail
           pushd roslyn >/dev/null
           VER=""
+          echo "Attempting to detect Roslyn version..."
           if [ -f eng/Version.Details.xml ]; then
-            # Try robust extraction from Version.Details.xml
+            echo "Found eng/Version.Details.xml"
+            grep -i 'Microsoft.CodeAnalysis.Common' eng/Version.Details.xml || true
             VER=$(grep -i 'Microsoft.CodeAnalysis.Common' eng/Version.Details.xml | grep -oE 'Version="[^"]+' | head -n1 | cut -d '"' -f2 || true)
           fi
           if [ -z "$VER" ] && [ -f eng/Versions.props ]; then
-            VER=$(grep -oP '<MicrosoftCodeAnalysisVersion>\K[^<]+' eng/Versions.props | head -n1 || true)
+            echo "Trying eng/Versions.props"
+            sed -n 's:.*<MicrosoftCodeAnalysisVersion>\\([^<]*\\)</MicrosoftCodeAnalysisVersion>.*:\1:p' eng/Versions.props | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
+            VER=$(sed -n 's:.*<MicrosoftCodeAnalysisVersion>\\([^<]*\\)</MicrosoftCodeAnalysisVersion>.*:\1:p' eng/Versions.props | head -n1 | tr -d '[:space:]' || true)
+          fi
+          if [ -z "$VER" ] && [ -f Directory.Packages.props ]; then
+            echo "Trying Directory.Packages.props"
+            VER=$(grep -oP 'Include="Microsoft.CodeAnalysis.Common"[^>]*Version="\K[^" ]+' Directory.Packages.props | head -n1 || true)
           fi
           if [ -z "$VER" ] && [ -f build/Targets/Packages.props ]; then
+            echo "Trying build/Targets/Packages.props"
             VER=$(grep -oP 'Microsoft.CodeAnalysis.Common" Version="\K[^" ]+' build/Targets/Packages.props | head -n1 || true)
           fi
+          if [ -z "$VER" ]; then
+            echo "Fallback: searching repository (may be noisy)" >&2
+            VER=$(grep -R "Microsoft.CodeAnalysis.Common" -n . | grep -oE 'Version=\"[^\"]+' | cut -d '"' -f2 | head -n1 || true)
+          fi
+          echo "Detected version: ${VER:-<none>}"
           popd >/dev/null
           [ -z "$VER" ] && VER=unknown
           echo "roslyn=$VER" >> $GITHUB_OUTPUT
@@ -115,18 +129,22 @@ jobs:
             if (fs.existsSync(prFile)) {
               const raw = fs.readFileSync(prFile,'utf8').split(/\r?\n/).filter(l=>l.trim());
               for (const line of raw) {
-                if (!line.startsWith('*')) continue;
-                const m = line.match(/\(#(\d+)\)/);
+                if (/^\((no PRs|pr-finder failed)\)$/.test(line)) continue; // skip sentinel
+                // Normalize to leading *
+                let norm = line.startsWith('*') ? line : `* ${line}`;
+                const m = norm.match(/\(#(\d+)\)/);
                 if (m) {
                   const num = m[1];
-                  let title = line.replace(/^\*\s*/,'').replace(/\s*\(#\d+\).*$/,'');
-                  prLines.push(`* ${title} (PR: [#${num}](https://github.com/dotnet/roslyn/pull/${num}))`);
-                } else {
-                  prLines.push(line);
+                  // Extract title without trailing (#num)
+                  const title = norm.replace(/^\*\s*/,'').replace(/\s*\(#\d+\).*$/,'');
+                  norm = `* ${title} (PR: [#${num}](https://github.com/dotnet/roslyn/pull/${num}))`;
                 }
+                prLines.push(norm);
               }
             }
-            prLines = Array.from(new Set(prLines));
+            // De-duplicate while preserving order
+            const seen = new Set();
+            prLines = prLines.filter(l => { if (seen.has(l)) return false; seen.add(l); return true; });
             const CHANGELOG = 'CHANGELOG.md';
             let changelog = fs.existsSync(CHANGELOG) ? fs.readFileSync(CHANGELOG,'utf8') : '# 2.x.x\n\n';
             const headerRegex = /^# 2\..*$/m;
