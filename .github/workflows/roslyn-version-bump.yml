@@ -131,7 +131,7 @@ jobs:
           set -euo pipefail
           pushd roslyn >/dev/null
           
-          if OUTPUT=$(roslyn-tools pr-finder -s "${{ steps.range.outputs.start }}" -e "${{ steps.range.outputs.end }}" --format changelog 2>/dev/null); then
+          if OUTPUT=$(roslyn-tools pr-finder -s "${{ steps.range.outputs.start }}" -e "${{ steps.range.outputs.end }}" --format changelog --label VSCode 2>/dev/null); then
             if [ -z "$OUTPUT" ]; then
               echo "(no PRs)" > ../pr-changelog.txt
             else
