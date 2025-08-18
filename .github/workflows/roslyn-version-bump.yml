@@ -25,15 +25,16 @@ jobs:
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Clone roslyn & pick last commit range
+      - name: Clone roslyn & set hardcoded range
         id: range
         run: |
           set -euo pipefail
-          git clone --depth 2 https://github.com/dotnet/roslyn.git roslyn
-          pushd roslyn >/dev/null
-          END=$(git rev-parse HEAD)
-          START=$(git rev-parse HEAD~1 || echo $END)
-          popd >/dev/null
+          git clone --no-tags --filter=blob:none --depth 500 https://github.com/dotnet/roslyn.git roslyn
+          # Hardcoded commit range per request
+          START=498e8d399b4911bdaec79664651ca29aaf2a66b9
+          END=7c7cfd9c3fee9f3be48c1f8b7f1d139cfb3f5942
+          echo "Using hardcoded start: $START"
+          echo "Using hardcoded end:   $END"
           echo "start=$START" >> $GITHUB_OUTPUT
           echo "end=$END" >> $GITHUB_OUTPUT
           if [ "$START" = "$END" ]; then echo "no_change=true" >> $GITHUB_OUTPUT; fi
@@ -46,7 +47,8 @@ jobs:
           pushd roslyn >/dev/null
           VER=""
           if [ -f eng/Version.Details.xml ]; then
-            VER=$(grep -oP 'Microsoft.CodeAnalysis.Common" Version="\K[^" ]+' eng/Version.Details.xml | head -n1 || true)
+            # Try robust extraction from Version.Details.xml
+            VER=$(grep -i 'Microsoft.CodeAnalysis.Common' eng/Version.Details.xml | grep -oE 'Version="[^"]+' | head -n1 | cut -d '"' -f2 || true)
           fi
           if [ -z "$VER" ] && [ -f eng/Versions.props ]; then
             VER=$(grep -oP '<MicrosoftCodeAnalysisVersion>\K[^<]+' eng/Versions.props | head -n1 || true)
@@ -57,6 +59,15 @@ jobs:
           popd >/dev/null
           [ -z "$VER" ] && VER=unknown
           echo "roslyn=$VER" >> $GITHUB_OUTPUT
+
+      - name: Auth settings
+        if: steps.range.outputs.no_change != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.roslyn-tools"
+          JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "${{ secrets.GITHUB_TOKEN }}")
+          printf '%s' "$JSON" | base64 | tr -d '\n' > "$HOME/.roslyn-tools/settings"
+          echo "Auth settings file created at $HOME/.roslyn-tools/settings"
 
       - name: Generate PR list
         id: prs
@@ -73,34 +84,39 @@ jobs:
           cat pr-changelog.txt
           if grep -qE '^\((no PRs|pr-finder failed)\)$' pr-changelog.txt; then echo "empty=true" >> $GITHUB_OUTPUT; fi
 
-      - name: Update CHANGELOG & bump version
+      - name: Update CHANGELOG & update defaults.roslyn
         id: update
-        if: steps.range.outputs.no_change != 'true' && steps.prs.outputs.empty != 'true'
+        if: steps.range.outputs.no_change != 'true'
         run: |
           set -euo pipefail
           DATE=$(date -u +%Y-%m-%d)
           ROSLYN_VER="${{ steps.rver.outputs.roslyn }}"
-          if [ -f package.json ]; then
-            CURR=$(jq -r .version package.json)
-            if echo "$CURR" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-              MAJOR=${CURR%%.*}; REST=${CURR#*.}; MINOR=${REST%%.*}; PATCH=${CURR##*.}; NEW_VER="$MAJOR.$MINOR.$((PATCH+1))"
+          UPDATED="false"
+          if [ -f package.json ] && [ "$ROSLYN_VER" != "unknown" ]; then
+            CURR_ROSLYN=$(jq -r '.defaults.roslyn // empty' package.json)
+            if [ "$CURR_ROSLYN" != "$ROSLYN_VER" ]; then
+              echo "Updating defaults.roslyn: $CURR_ROSLYN -> $ROSLYN_VER"
+              jq ".defaults.roslyn=\"$ROSLYN_VER\"" package.json > _tmp && mv _tmp package.json
+              UPDATED="true"
             else
-              NEW_VER="0.1.0"
-            fi
-            if [ "$ROSLYN_VER" != "unknown" ]; then
-              jq ".version=\"$NEW_VER\" | .defaults.roslyn=\"$ROSLYN_VER\"" package.json > _tmp && mv _tmp package.json
-            else
-              jq ".version=\"$NEW_VER\"" package.json > _tmp && mv _tmp package.json
+              echo "defaults.roslyn already $CURR_ROSLYN; no change"
             fi
           fi
+          echo "updated=$UPDATED" >> $GITHUB_OUTPUT
           RANGE_HEADER="### Roslyn changes ($DATE)"
           DIFF_URL="https://github.com/dotnet/roslyn/compare/${{ steps.range.outputs.start }}...${{ steps.range.outputs.end }}?w=1"
-          PKG_VER_LINE="Extension package version: $(jq -r .version package.json 2>/dev/null || echo unknown)"
-          BUMP_LINE="* Bump Roslyn to ${ROSLYN_VER}"
-          { echo "$RANGE_HEADER"; echo; echo "Range: ${{ steps.range.outputs.start }}...${{ steps.range.outputs.end }}"; echo "Diff: $DIFF_URL"; echo "PR: PR_LINK_PLACEHOLDER"; echo "$BUMP_LINE"; echo "$PKG_VER_LINE"; echo; echo "#### PRs"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG.md 2>/dev/null > _tmp && mv _tmp CHANGELOG.md
+          EXT_VER_LINE="Extension package version: $(jq -r .version package.json 2>/dev/null || echo unknown)"
+          if [ "$ROSLYN_VER" = "unknown" ]; then
+            BUMP_LINE="* Roslyn version unresolved"
+          elif [ "$UPDATED" = "true" ]; then
+            BUMP_LINE="* Bump Roslyn to ${ROSLYN_VER}"
+          else
+            BUMP_LINE="* Roslyn version unchanged (${ROSLYN_VER})"
+          fi
+          { echo "$RANGE_HEADER"; echo; echo "Range: ${{ steps.range.outputs.start }}...${{ steps.range.outputs.end }}"; echo "Diff: $DIFF_URL"; echo "PR: PR_LINK_PLACEHOLDER"; echo "$BUMP_LINE"; echo "$EXT_VER_LINE"; echo; echo "#### PRs"; echo; cat pr-changelog.txt; echo; } | cat - CHANGELOG.md 2>/dev/null > _tmp && mv _tmp CHANGELOG.md
 
       - name: Create PR
-        if: steps.range.outputs.no_change != 'true' && steps.prs.outputs.empty != 'true'
+        if: ${{ steps.range.outputs.no_change != 'true' && (steps.update.outputs.updated == 'true' || steps.prs.outputs.empty != 'true') }}
         id: cpr
         uses: peter-evans/create-pull-request@v5
         with:
@@ -116,7 +132,7 @@ jobs:
             Range: `${{ steps.range.outputs.start }}` ... `${{ steps.range.outputs.end }}`.
             See CHANGELOG.md.
       - name: Backfill PR link in CHANGELOG
-        if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true' && steps.prs.outputs.empty != 'true'
+        if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true'
         run: |
           set -euo pipefail
           PR_URL="${{ steps.cpr.outputs.pull-request-url }}"
@@ -130,5 +146,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add CHANGELOG.md package.json || true
-          git commit -m "Backfill PR link #$PR_NUM and version ${{ steps.update.outputs.new_version }}"
+          git commit -m "Backfill PR link #$PR_NUM"
           git push origin "$BRANCH"
