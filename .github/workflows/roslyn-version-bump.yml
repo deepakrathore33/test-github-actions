@@ -26,25 +26,41 @@ jobs:
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Clone roslyn & set hardcoded range
+      - name: Clone roslyn & determine range
         id: range
         shell: bash
         run: |
           set -euo pipefail
           git clone --no-tags --filter=blob:none --depth 500 https://github.com/dotnet/roslyn.git roslyn
           
-          # Hardcoded commit range per request
-          START=498e8d399b4911bdaec79664651ca29aaf2a66b9
-          END=7c7cfd9c3fee9f3be48c1f8b7f1d139cfb3f5942
+          # Get the latest commit SHA from main branch
+          pushd roslyn >/dev/null
+          END=$(git rev-parse HEAD)
+          popd >/dev/null
           
-          echo "Using hardcoded start: $START"
-          echo "Using hardcoded end:   $END"
+          # Try to get the last processed commit from the stored file
+          LAST_SHA_FILE=".github/roslyn-last-sha.txt"
+          if [ -f "$LAST_SHA_FILE" ]; then
+            START=$(cat "$LAST_SHA_FILE")
+            echo "Found previous run ending at: $START"
+          else
+            echo "Error: .github/roslyn-last-sha.txt not found"
+            echo "Please ensure the file exists with a valid commit SHA"
+            exit 1
+          fi
+          
+          echo "Using commit range:"
+          echo "  START: $START"
+          echo "  END:   $END"
           
           echo "start=$START" >> $GITHUB_OUTPUT
           echo "end=$END" >> $GITHUB_OUTPUT
           
           if [ "$START" = "$END" ]; then 
             echo "no_change=true" >> $GITHUB_OUTPUT
+            echo "No new commits to process"
+          else
+            echo "Found $(pushd roslyn >/dev/null && git rev-list --count $START..$END && popd >/dev/null) commits to process"
           fi
 
       - name: Auth settings
@@ -305,3 +321,25 @@ jobs:
           git add CHANGELOG.md package.json || true
           git commit -m "Backfill PR link #$PR_NUM"
           git push origin "$BRANCH"
+
+      - name: Update last processed SHA
+        if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # Store the END SHA for the next run
+          echo "${{ steps.range.outputs.end }}" > .github/roslyn-last-sha.txt
+          
+          # Commit this update to main branch
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .github/roslyn-last-sha.txt
+          
+          if ! git diff --staged --quiet; then
+            git commit -m "Update last processed Roslyn SHA to ${{ steps.range.outputs.end }}"
+            git push origin main
+            echo "Updated last processed SHA to ${{ steps.range.outputs.end }}"
+          else
+            echo "No changes to commit for SHA tracking"
+          fi
