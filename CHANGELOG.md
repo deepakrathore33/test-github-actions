@@ -4,7 +4,7 @@
 - Debug from .csproj and .sln [#5876](https://github.com/dotnet/vscode-csharp/issues/5876)
 
 # 2.89.x
-* Bump Roslyn to 5.0.0-2.25412.5 (PR: [#8527](https://github.com/dotnet/vscode-csharp/pull/8527))
+* Bump Roslyn (version unresolved) (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))
   * Don't try to load file based projects unless we get a .cs file(PR: [#79844](https://github.com/dotnet/roslyn/pull/79844))
   * Workaround VSCode's lack of support for case sorting in completion(PR: [#79772](https://github.com/dotnet/roslyn/pull/79772))
   * Add messages for when design time builds begin and complete(PR: [#79669](https://github.com/dotnet/roslyn/pull/79669))
@@ -130,7 +130,6 @@
   * Simplify tag to self-closing code action (PR: [#11802](https://github.com/dotnet/razor/pull/11802))
   * Bind directive attribute `event` parameter HTML event completions (PR: [#11804](https://github.com/dotnet/razor/pull/11804))
   * Allow Razor completion items on deletion (PR: [#11991](https://github.com/dotnet/razor/pull/11991))
-
 
 # 2.85.x
 * Bump Roslyn to 5.0.0-1.25326.2 (PR: [#8386](https://github.com/dotnet/vscode-csharp/pull/8386))
@@ -535,7 +534,6 @@
   * Fix assembly load when file path contains URI reserved chars (PR: [#76617](https://github.com/dotnet/roslyn/pull/76617))
   * Reduce allocations during checksum creation. (PR: [#76524](https://github.com/dotnet/roslyn/pull/76524))
 * Bump xamlTools to 17.13.35709.178 (PR: [#7914](https://github.com/dotnet/vscode-csharp/pull/7914))
-
 
 # 2.61.28
 * Update Razor to 9.0.0-preview.25052.3 (PR: [#7904](https://github.com/dotnet/vscode-csharp/pull/7904))
@@ -1716,7 +1714,6 @@ We are switching to the new Roslyn language server as the default. We recognize 
   * Support signature help for implicit object creation ([omnisharp-roslyn#2243](https://github.com/OmniSharp/omnisharp-roslyn/issues/2243), PR: [omnisharp-roslyn#2244](https://github.com/OmniSharp/omnisharp-roslyn/pull/2244))
   * Implement /v2/gotodefinition for Cake ([omnisharp-roslyn#2209](https://github.com/OmniSharp/omnisharp-roslyn/issues/2209), PR: [omnisharp-roslyn#2212](https://github.com/OmniSharp/omnisharp-roslyn/pull/2212))
 
-
 ## 1.23.16 (Oct 12th, 2021)
 * Show decompilation authorization once per install. ([#3982](https://github.com/OmniSharp/omnisharp-vscode/issues/3982), PR: [#4760](https://github.com/OmniSharp/omnisharp-vscode/pull/4760))
 * Launch with first Folder or Solution target found (PR: [#4780](https://github.com/OmniSharp/omnisharp-vscode/pull/4780))
@@ -2170,7 +2167,6 @@ We are switching to the new Roslyn language server as the default. We recognize 
     ```
 * Added support for *AdditionalFiles* in csproj files ([omnisharp-roslyn#1510](https://github.com/OmniSharp/omnisharp-roslyn/issues/1510), PR: [omnisharp-roslyn#1547](https://github.com/OmniSharp/omnisharp-roslyn/pull/1547))
 * Fixed a bug in *.editorconfig* where formatting settings were not correctly passed into external code fixes ([omnisharp-roslyn#1558](https://github.com/OmniSharp/omnisharp-roslyn/issues/1558), PR: [omnisharp-roslyn#1559](https://github.com/OmniSharp/omnisharp-roslyn/pull/1559))
-
 
 ## 1.20.0 (June 11, 2019)
 
