@@ -171,8 +171,7 @@ jobs:
                   core.warning(`Could not update package.json: ${err.message}`);
                 }
               }
-            
-            try {
+              
               // Load pr-finder output and filter out diff link
               let prLines = [];
               try {
