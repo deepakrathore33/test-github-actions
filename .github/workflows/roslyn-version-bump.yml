@@ -30,29 +30,11 @@ jobs:
         run: |
           set -euo pipefail
           git clone --no-tags --filter=blob:none --depth 200 https://github.com/dotnet/roslyn.git roslyn
-          END=$(git -C roslyn rev-parse HEAD)
-          if [ -f .github/roslyn-last-sha.txt ]; then
-            START=$(cat .github/roslyn-last-sha.txt)
-            echo "Using stored start commit: $START"
-          else
-            START=$(git -C roslyn rev-list --max-count=2 HEAD | tail -n1 || git -C roslyn rev-parse HEAD)
-            echo "Derived start commit: $START"
-          fi
-          if ! git -C roslyn cat-file -e "$START^{commit}" 2>/dev/null; then
-            echo "Start commit $START not in shallow clone; fetching it";
-            git -C roslyn fetch --no-tags origin "$START" || true
-          fi
-          if ! git -C roslyn merge-base --is-ancestor "$START" "$END" 2>/dev/null; then
-            echo "Start commit is not an ancestor of end; unshallowing to repair history";
-            if ! git -C roslyn fetch --prune --unshallow; then
-              echo "Unshallow failed; attempting large depth fetch";
-              git -C roslyn fetch --depth=10000 origin || true
-            fi
-          fi
-          if ! git -C roslyn merge-base --is-ancestor "$START" "$END" 2>/dev/null; then
-            echo "WARNING: Start commit still not ancestor after fetch; falling back to parent of END";
-            START=$(git -C roslyn rev-list --max-count=2 "$END" | tail -n1)
-          fi
+          # Hardcoded commit range per request
+          START=498e8d399b4911bdaec79664651ca29aaf2a66b9
+          END=7c7cfd9c3fee9f3be48c1f8b7f1d139cfb3f5942
+          echo "Using hardcoded start: $START"
+          echo "Using hardcoded end:   $END"
           echo "start=$START" >> $GITHUB_OUTPUT
           echo "end=$END" >> $GITHUB_OUTPUT
           if [ "$START" = "$END" ]; then echo "no_change=true" >> $GITHUB_OUTPUT; fi
