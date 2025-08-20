@@ -118,131 +118,89 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Get the latest successful build from Roslyn CI pipeline (public access)
-          AZDO_ORG="https://dev.azure.com/dnceng"
-          PROJECT="public"  # Use public project - no auth required
-          PIPELINE_ID="15"  # Roslyn CI pipeline ID in public project
+          # Get latest Roslyn version from NuGet feed directly
+          echo "Getting latest Roslyn version from NuGet feed..."
           
-          # If specific build ID provided, use it; otherwise get latest
-          if [ -n "${{ github.event.inputs.roslyn_build_id }}" ]; then
-            BUILD_ID="${{ github.event.inputs.roslyn_build_id }}"
-            echo "Using specified build ID: $BUILD_ID"
+          # Query the dotnet-tools feed for latest Microsoft.CodeAnalysis.Common package
+          PACKAGE_NAME="microsoft.codeanalysis.common"
+          FEED_URL="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json"
+          
+          # Get feed service index
+          FEED_INDEX=$(curl -s "$FEED_URL")
+          
+          # Extract the SearchQueryService URL
+          SEARCH_URL=$(echo "$FEED_INDEX" | jq -r '.resources[] | select(."@type" | contains("SearchQueryService")) | ."@id"' | head -n1)
+          
+          if [ -z "$SEARCH_URL" ]; then
+            # Fallback to direct package index
+            echo "Using direct package index..."
+            PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+            VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
+            
+            if [ -z "$VERSIONS" ]; then
+              # Try the dotnet8 feed as fallback
+              PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+              VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
+            fi
+            
+            # Get the latest version (last in the list, filtering prereleases)
+            VERSION=$(echo "$VERSIONS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' | tail -n1)
           else
-            # Get latest successful build from main branch
-            BUILDS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds?definitions=$PIPELINE_ID&branchName=refs/heads/main&statusFilter=completed&resultFilter=succeeded&\$top=1&api-version=7.0"
-            echo "Fetching from: $BUILDS_URL"
-            
-            BUILD_INFO=$(curl -s -H "Accept: application/json" "$BUILDS_URL")
-            
-            # Check if we got valid JSON
-            if ! echo "$BUILD_INFO" | jq empty 2>/dev/null; then
-              echo "Error: Invalid JSON response from Azure DevOps"
-              echo "Response preview: ${BUILD_INFO:0:500}"
-              exit 1
-            fi
-            
-            BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id // empty')
-            BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber // empty')
-            
-            if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
-              echo "Error: Could not get build ID from Azure DevOps"
-              echo "Full response: $BUILD_INFO"
-              exit 1
-            fi
-            
-            echo "Latest build: $BUILD_NUMBER (ID: $BUILD_ID)"
+            # Query for the package
+            SEARCH_RESULT=$(curl -s "${SEARCH_URL}?q=$PACKAGE_NAME&prerelease=true&take=1")
+            VERSION=$(echo "$SEARCH_RESULT" | jq -r '.data[0].version // empty')
           fi
           
-          # Get build details
-          BUILD_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID?api-version=7.0"
-          BUILD_DETAILS=$(curl -s -H "Accept: application/json" "$BUILD_URL")
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not get latest Roslyn version from feed"
+            # Use a fallback - get latest from GitHub
+            echo "Falling back to GitHub for latest version"
+            VERSION="5.0.0-dev"
+          fi
           
-          # Extract commit SHA
-          END_SHA=$(echo "$BUILD_DETAILS" | jq -r '.sourceVersion // empty')
-          BUILD_NUMBER=$(echo "$BUILD_DETAILS" | jq -r '.buildNumber // empty')
+          echo "Latest Roslyn version from feed: $VERSION"
           
+          # Now download this package to get the commit SHA
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
+          
+          echo "Downloading package to extract commit SHA..."
+          DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
+          PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
+          
+          END_SHA=""
+          if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
+            unzip -q package.nupkg
+            NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
+            if [ -n "$NUSPEC_FILE" ]; then
+              END_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
+              echo "Extracted commit SHA from package: $END_SHA"
+            fi
+          fi
+          
+          cd - >/dev/null
+          rm -rf "$TEMP_DIR"
+          
+          # If we couldn't get SHA from package, get latest from GitHub
           if [ -z "$END_SHA" ] || [ "$END_SHA" = "null" ]; then
-            echo "Error: Could not get source version from build"
-            exit 1
+            echo "Getting latest commit from GitHub..."
+            END_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha // empty')
+            
+            if [ -z "$END_SHA" ]; then
+              echo "Error: Could not get latest commit SHA"
+              exit 1
+            fi
           fi
           
           echo "end=$END_SHA" >> $GITHUB_OUTPUT
-          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
-          echo "Latest Roslyn commit: $END_SHA"
-          echo "Build number: $BUILD_NUMBER"
-          
-          # Try to download artifacts to get exact version
-          ARTIFACTS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?api-version=7.0"
-          ARTIFACT_LIST=$(curl -s -H "Accept: application/json" "$ARTIFACTS_URL")
-          
-          # Look for any artifact containing version info
-          VERSION=""
-          
-          # First try AssetManifests if available
-          ASSET_MANIFEST_URL=$(echo "$ARTIFACT_LIST" | jq -r '.value[] | select(.name=="AssetManifests") | .resource.downloadUrl // empty' | head -n1)
-          
-          if [ -n "$ASSET_MANIFEST_URL" ] && [ "$ASSET_MANIFEST_URL" != "null" ]; then
-            echo "Found AssetManifests artifact, downloading..."
-            TEMP_DIR=$(mktemp -d)
-            cd "$TEMP_DIR"
-            
-            if curl -L -o assetmanifests.zip "$ASSET_MANIFEST_URL" 2>/dev/null && unzip -q assetmanifests.zip 2>/dev/null; then
-              XML_FILE=$(find . -name "*.xml" | head -n1)
-              if [ -n "$XML_FILE" ]; then
-                VERSION=$(grep -oP 'Version="\K[0-9]+\.[0-9]+\.[0-9]+-[^"]+' "$XML_FILE" | head -n1)
-              fi
-            fi
-            
-            cd - >/dev/null
-            rm -rf "$TEMP_DIR"
-          fi
-          
-          # If no version yet, try to get from build artifacts metadata
-          if [ -z "$VERSION" ]; then
-            # Check if there's a VSSetup artifact which contains version info
-            VSSETUP_URL=$(echo "$ARTIFACT_LIST" | jq -r '.value[] | select(.name | contains("VSSetup")) | .resource.downloadUrl // empty' | head -n1)
-            
-            if [ -n "$VSSETUP_URL" ] && [ "$VSSETUP_URL" != "null" ]; then
-              echo "Checking VSSetup artifact for version..."
-              TEMP_DIR=$(mktemp -d)
-              cd "$TEMP_DIR"
-              
-              if curl -L -o vssetup.zip "$VSSETUP_URL" 2>/dev/null && unzip -q vssetup.zip 2>/dev/null; then
-                # Look for version in any json or xml files
-                VERSION=$(find . -name "*.json" -o -name "*.xml" | xargs grep -oP '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-              fi
-              
-              cd - >/dev/null
-              rm -rf "$TEMP_DIR"
-            fi
-          fi
-          
-          # Last resort: extract from build number or use a placeholder
-          if [ -z "$VERSION" ]; then
-            echo "Warning: Could not get version from artifacts"
-            # Try to extract from build number (format: main-vs-deps-20241219.1)
-            # We'll construct a version from the date
-            if [[ "$BUILD_NUMBER" =~ ([0-9]{8})\.([0-9]+) ]]; then
-              DATE="${BASH_REMATCH[1]}"
-              BUILD="${BASH_REMATCH[2]}"
-              # Convert date format YYYYMMDD to YY.MM.DD
-              YEAR="${DATE:2:2}"
-              MONTH="${DATE:4:2}"
-              DAY="${DATE:6:2}"
-              VERSION="5.0.0-3.${YEAR}${MONTH}${DAY}.${BUILD}"
-              echo "Constructed version from build number: $VERSION"
-            else
-              VERSION="5.0.0-dev"
-              echo "Using placeholder version: $VERSION"
-            fi
-          fi
-          
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Latest Roslyn commit: $END_SHA"
           echo "Latest Roslyn version: $VERSION"
           
-          # Store build metadata for PR body
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-          echo "build_url=$AZDO_ORG/$PROJECT/_build/results?buildId=$BUILD_ID" >> $GITHUB_OUTPUT
+          # For build metadata, use GitHub commit URL
+          echo "build_id=github" >> $GITHUB_OUTPUT
+          echo "build_url=https://github.com/dotnet/roslyn/commit/$END_SHA" >> $GITHUB_OUTPUT
+          echo "build_number=$VERSION" >> $GITHUB_OUTPUT
           
           if [ "${{ steps.current.outputs.start }}" = "$END_SHA" ]; then
             echo "no_change=true" >> $GITHUB_OUTPUT
