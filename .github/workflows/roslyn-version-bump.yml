@@ -51,73 +51,98 @@ jobs:
           
           echo "Current Roslyn version: $CURRENT_VERSION"
           
-          # Following the approach from vscode-csharp's createTagsTasks.ts
-          # They map the version to a Git tag in the Roslyn repo
+          # Following the approach from vscode-csharp's createTagsTasks.ts getCommitFromNugetAsync
+          # Download the NuGet package and extract commit SHA from .nuspec file
           
-          # Extract the base version (e.g., "5.0.0" from "5.0.0-2.25412.5")
-          VERSION_BASE=$(echo "$CURRENT_VERSION" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
           
-          if [ -z "$VERSION_BASE" ]; then
-            echo "Error: Could not extract base version from $CURRENT_VERSION"
+          # The package name used in vscode-csharp
+          PACKAGE_NAME="microsoft.codeanalysis.common"
+          
+          # Try to download the package - first from public feeds that have Roslyn packages
+          PACKAGE_DOWNLOADED=false
+          
+          # Method 1: Try dotnet-tools feed (where Roslyn packages are published)
+          echo "Attempting to download from dotnet-tools feed..."
+          DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
+          PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
+          if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
+            echo "Downloaded from dotnet-tools feed"
+            PACKAGE_DOWNLOADED=true
+          fi
+          
+          # Method 2: Try nuget.org (for released versions)
+          if [ "$PACKAGE_DOWNLOADED" = false ]; then
+            echo "Attempting to download from nuget.org..."
+            NUGET_URL="https://api.nuget.org/v3-flatcontainer/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
+            if curl -f -L -o package.nupkg "$NUGET_URL" 2>/dev/null; then
+              echo "Downloaded from nuget.org"
+              PACKAGE_DOWNLOADED=true
+            fi
+          fi
+          
+          # Method 3: Try dotnet8 feed
+          if [ "$PACKAGE_DOWNLOADED" = false ]; then
+            echo "Attempting to download from dotnet8 feed..."
+            DOTNET8_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2"
+            PACKAGE_URL="$DOTNET8_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
+            if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
+              echo "Downloaded from dotnet8 feed"
+              PACKAGE_DOWNLOADED=true
+            fi
+          fi
+          
+          if [ "$PACKAGE_DOWNLOADED" = false ]; then
+            echo "Error: Could not download package $PACKAGE_NAME version $CURRENT_VERSION from any feed"
+            echo "For testing, using placeholder SHA"
+            START_SHA="0000000000000000000000000000000000000000"
+            echo "start=$START_SHA" >> $GITHUB_OUTPUT
+            cd - >/dev/null
+            rm -rf "$TEMP_DIR"
+            exit 0
+          fi
+          
+          # Extract the package
+          unzip -q package.nupkg
+          
+          # Find the .nuspec file (following createTagsTasks.ts logic)
+          NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
+          
+          if [ -z "$NUSPEC_FILE" ]; then
+            echo "Error: No .nuspec file found in package"
             exit 1
           fi
           
-          echo "Looking for Roslyn tag matching version $VERSION_BASE"
+          echo "Found nuspec file: $NUSPEC_FILE"
           
-          # Query GitHub API for tags in the Roslyn repo
-          # The tag format is usually like "v4.8.0" or "Visual-Studio-2019-Version-16.11"
-          TAGS_RESPONSE=$(curl -s "https://api.github.com/repos/dotnet/roslyn/git/refs/tags")
+          # Extract commit SHA from .nuspec file using the same regex pattern as createTagsTasks.ts
+          # Looking for: repository type="git" url="..." commit="SHA"
+          START_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
           
-          # First try to find exact version tag (e.g., "v5.0.0")
-          TAG_REF=$(echo "$TAGS_RESPONSE" | jq -r ".[] | select(.ref | test(\"refs/tags/v?$VERSION_BASE\$\")) | .ref" | head -n1)
-          
-          if [ -z "$TAG_REF" ]; then
-            # Try to find a tag containing the version
-            TAG_REF=$(echo "$TAGS_RESPONSE" | jq -r ".[] | select(.ref | contains(\"$VERSION_BASE\")) | .ref" | head -n1)
+          if [ -z "$START_SHA" ]; then
+            # Try alternative patterns
+            START_SHA=$(grep -oP 'commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
           fi
           
-          if [ -z "$TAG_REF" ]; then
-            echo "Warning: Could not find tag for version $VERSION_BASE"
-            # For prerelease versions, we might not have a tag yet
-            # Try to use the commit from the latest main branch as fallback
-            echo "Using fallback: latest commit from main branch"
-            START_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha')
-          else
-            echo "Found tag: $TAG_REF"
-            # Get the commit SHA for this tag
-            TAG_NAME=$(echo "$TAG_REF" | sed 's|refs/tags/||')
-            TAG_INFO=$(curl -s "https://api.github.com/repos/dotnet/roslyn/git/tags/$TAG_NAME")
-            
-            # Check if it's an annotated tag or lightweight tag
-            if [ "$(echo "$TAG_INFO" | jq -r '.object.type')" = "commit" ]; then
-              # Annotated tag
-              START_SHA=$(echo "$TAG_INFO" | jq -r '.object.sha')
-            else
-              # Lightweight tag or direct ref
-              START_SHA=$(echo "$TAG_INFO" | jq -r '.sha')
-            fi
-            
-            # If we still don't have a SHA, get it from the ref directly
-            if [ -z "$START_SHA" ] || [ "$START_SHA" = "null" ]; then
-              START_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/git/$TAG_REF" | jq -r '.object.sha')
-            fi
-          fi
-          
-          if [ -z "$START_SHA" ] || [ "$START_SHA" = "null" ]; then
-            echo "Error: Could not determine SHA for current version"
-            # Use a placeholder for testing
+          if [ -z "$START_SHA" ]; then
+            echo "Warning: Could not extract commit SHA from nuspec file"
+            cat "$NUSPEC_FILE" | grep -i repository || echo "No repository element found"
+            echo "Using placeholder SHA for testing"
             START_SHA="0000000000000000000000000000000000000000"
           fi
+          
+          cd - >/dev/null
+          rm -rf "$TEMP_DIR"
           
           # Validate SHA format
           if ! echo "$START_SHA" | grep -qE '^[a-f0-9]{40}$'; then
             echo "Warning: Invalid SHA format: $START_SHA"
-            # For testing, use placeholder
             START_SHA="0000000000000000000000000000000000000000"
           fi
           
           echo "start=$START_SHA" >> $GITHUB_OUTPUT
-          echo "Current Roslyn SHA: $START_SHA"
+          echo "Current Roslyn SHA from nuspec: $START_SHA"
 
       - name: Get latest Roslyn build from Azure DevOps
         id: latest
