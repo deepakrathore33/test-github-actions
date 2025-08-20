@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 9 * * *'
   workflow_dispatch:
+    inputs:
+      roslyn_build_id:
+        description: 'Specific Roslyn build ID (optional)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -19,52 +24,161 @@ jobs:
         with:
           dotnet-version: 9.0.x
 
-      - name: Install roslyn-tools
+      - name: Install tools
         shell: bash
         run: |
+          # Install roslyn-tools
           FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
           dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          
+          # Install jq for JSON parsing
+          sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Clone roslyn & determine range
-        id: range
+      - name: Get current Roslyn SHA from package
+        id: current
         shell: bash
         run: |
           set -euo pipefail
-          git clone --no-tags --filter=blob:none --depth 500 https://github.com/dotnet/roslyn.git roslyn
           
-          # Get the latest commit SHA from main branch
-          pushd roslyn >/dev/null
-          END=$(git rev-parse HEAD)
-          popd >/dev/null
+          # Read current version from package.json
+          CURRENT_VERSION=$(jq -r '.defaults.roslyn // empty' package.json)
           
-          # Try to get the last processed commit from the stored file
-          LAST_SHA_FILE=".github/roslyn-last-sha.txt"
-          if [ -f "$LAST_SHA_FILE" ]; then
-            START=$(cat "$LAST_SHA_FILE")
-            echo "Found previous run ending at: $START"
-          else
-            echo "Error: .github/roslyn-last-sha.txt not found"
-            echo "Please ensure the file exists with a valid commit SHA"
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "Error: Could not find roslyn version in package.json"
             exit 1
           fi
           
-          echo "Using commit range:"
-          echo "  START: $START"
-          echo "  END:   $END"
+          echo "Current Roslyn version: $CURRENT_VERSION"
           
-          echo "start=$START" >> $GITHUB_OUTPUT
-          echo "end=$END" >> $GITHUB_OUTPUT
+          # Download and extract the NuGet package to get the SHA
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
           
-          if [ "$START" = "$END" ]; then 
+          # Download the package
+          curl -L -o package.nupkg "https://api.nuget.org/v3-flatcontainer/microsoft.codeanalysis.common/$CURRENT_VERSION/microsoft.codeanalysis.common.$CURRENT_VERSION.nupkg"
+          
+          # Extract and get SHA from package metadata (similar to createTagsTasks.ts#L217)
+          unzip -q package.nupkg
+          START_SHA=$(grep -oP 'repository.*commit="\K[^"]+' *.nuspec | head -n1 || echo "")
+          
+          cd - >/dev/null
+          rm -rf "$TEMP_DIR"
+          
+          if [ -z "$START_SHA" ]; then
+            echo "Error: Could not extract SHA from current package"
+            exit 1
+          fi
+          
+          echo "start=$START_SHA" >> $GITHUB_OUTPUT
+          echo "Current SHA: $START_SHA"
+
+      - name: Get latest Roslyn build from Azure DevOps
+        id: latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # This step mimics what Azure Pipelines would provide via:
+          # $(resources.pipeline.officialBuildCI.sourceCommit)
+          # $(resources.pipeline.officialBuildCI.runName)
+          
+          # Get the latest successful build from dotnet-roslyn-official pipeline
+          # Pipeline definition ID: 327 (from the reference)
+          AZDO_ORG="https://dev.azure.com/dnceng"
+          PROJECT="internal"
+          PIPELINE_ID="327"
+          
+          # If specific build ID provided, use it; otherwise get latest
+          if [ -n "${{ github.event.inputs.roslyn_build_id }}" ]; then
+            BUILD_ID="${{ github.event.inputs.roslyn_build_id }}"
+            echo "Using specified build ID: $BUILD_ID"
+          else
+            # Get latest successful build from main branch
+            # This is equivalent to Azure Pipelines resource with branch: main
+            BUILDS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds?definitions=$PIPELINE_ID&branchName=refs/heads/main&statusFilter=completed&resultFilter=succeeded&\$top=1&api-version=7.0"
+            BUILD_INFO=$(curl -s "$BUILDS_URL")
+            BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id')
+            BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber')
+            echo "Latest build: $BUILD_NUMBER (ID: $BUILD_ID)"
+          fi
+          
+          # Get build details
+          BUILD_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID?api-version=7.0"
+          BUILD_DETAILS=$(curl -s "$BUILD_URL")
+          
+          # Extract END SHA (sourceVersion) - equivalent to $(resources.pipeline.officialBuildCI.sourceCommit)
+          END_SHA=$(echo "$BUILD_DETAILS" | jq -r '.sourceVersion')
+          # Extract build number - equivalent to $(resources.pipeline.officialBuildCI.runName)
+          BUILD_NUMBER=$(echo "$BUILD_DETAILS" | jq -r '.buildNumber')
+          
+          echo "end=$END_SHA" >> $GITHUB_OUTPUT
+          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "Latest Roslyn commit (sourceCommit): $END_SHA"
+          echo "Build number (runName): $BUILD_NUMBER"
+          
+          # Download AssetManifests artifact to get version
+          # This is what would be downloaded via pipeline artifact input in Azure Pipelines
+          ARTIFACTS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?artifactName=AssetManifests&api-version=7.0"
+          ARTIFACT_INFO=$(curl -s "$ARTIFACTS_URL")
+          DOWNLOAD_URL=$(echo "$ARTIFACT_INFO" | jq -r '.resource.downloadUrl')
+          
+          if [ "$DOWNLOAD_URL" = "null" ] || [ -z "$DOWNLOAD_URL" ]; then
+            echo "Warning: AssetManifests artifact not found, checking for alternate location"
+            # Try without specific artifact name
+            ARTIFACTS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?api-version=7.0"
+            ARTIFACT_LIST=$(curl -s "$ARTIFACTS_URL")
+            echo "Available artifacts: $(echo "$ARTIFACT_LIST" | jq -r '.value[].name')"
+            
+            # Look for AssetManifests in the list
+            DOWNLOAD_URL=$(echo "$ARTIFACT_LIST" | jq -r '.value[] | select(.name=="AssetManifests") | .resource.downloadUrl')
+          fi
+          
+          # Download and extract AssetManifests
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
+          curl -L -o assetmanifests.zip "$DOWNLOAD_URL"
+          unzip -q assetmanifests.zip
+          
+          # Parse OfficialBuild.xml to get version (as Joey mentioned)
+          if [ -f "AssetManifests/OfficialBuild.xml" ]; then
+            VERSION=$(grep -oP 'Id="Microsoft.CodeAnalysis.Common".*Version="\K[^"]+' AssetManifests/OfficialBuild.xml | head -n1)
+          elif [ -f "OfficialBuild.xml" ]; then
+            VERSION=$(grep -oP 'Id="Microsoft.CodeAnalysis.Common".*Version="\K[^"]+' OfficialBuild.xml | head -n1)
+          else
+            echo "Warning: Could not find OfficialBuild.xml"
+            # Try to extract from build number as fallback
+            VERSION=$(echo "$BUILD_NUMBER" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+          fi
+          
+          cd - >/dev/null
+          rm -rf "$TEMP_DIR"
+          
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract version from AssetManifests"
+            exit 1
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Latest Roslyn version: $VERSION"
+          
+          # Store build metadata for PR body
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "build_url=$AZDO_ORG/$PROJECT/_build/results?buildId=$BUILD_ID" >> $GITHUB_OUTPUT
+          
+          if [ "${{ steps.current.outputs.start }}" = "$END_SHA" ]; then
             echo "no_change=true" >> $GITHUB_OUTPUT
             echo "No new commits to process"
-          else
-            echo "Found $(pushd roslyn >/dev/null && git rev-list --count $START..$END && popd >/dev/null) commits to process"
           fi
 
+      - name: Clone roslyn for PR finder
+        if: steps.latest.outputs.no_change != 'true'
+        shell: bash
+        run: |
+          git clone --no-tags --filter=blob:none --depth=500 https://github.com/dotnet/roslyn.git roslyn
+
       - name: Auth settings
-        if: steps.range.outputs.no_change != 'true'
+        if: steps.latest.outputs.no_change != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -72,68 +186,24 @@ jobs:
           
           JSON=$(printf '{"GitHubToken":"%s","DevDivAzureDevOpsToken":"","DncEngAzureDevOpsToken":""}' "${{ secrets.GITHUB_TOKEN }}")
           printf '%s' "$JSON" | base64 | tr -d '\n' > "$HOME/.roslyn-tools/settings"
-          
-          echo "Auth settings file created at $HOME/.roslyn-tools/settings"
-
-      - name: Determine Roslyn version from changes
-        id: rver
-        if: steps.range.outputs.no_change != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          pushd roslyn >/dev/null
-          
-          VER=""
-          echo "Attempting to detect Roslyn version from commit range..."
-          
-          # Checkout the END commit to get the latest version
-          git checkout "${{ steps.range.outputs.end }}" >/dev/null 2>&1
-          
-          # Primary method: Check eng/Version.Details.xml for Microsoft.CodeAnalysis.Common
-          if [ -f eng/Version.Details.xml ] && [ -z "$VER" ]; then
-            echo "Checking eng/Version.Details.xml for Microsoft.CodeAnalysis.Common"
-            VER=$(xmllint --xpath "//Dependency[@Name='Microsoft.CodeAnalysis.Common']/@Version" eng/Version.Details.xml 2>/dev/null | sed 's/Version="//' | sed 's/"//' || true)
-            if [ -z "$VER" ]; then
-              # Fallback: use grep if xmllint not available
-              VER=$(grep -A1 -B1 'Microsoft.CodeAnalysis.Common' eng/Version.Details.xml | grep 'Version=' | grep -oE 'Version="[^"]+' | cut -d '"' -f2 | head -n1 || true)
-            fi
-          fi
-          
-          # Secondary method: Check eng/Versions.props
-          if [ -f eng/Versions.props ] && [ -z "$VER" ]; then
-            echo "Checking eng/Versions.props for MicrosoftCodeAnalysisVersion"
-            VER=$(grep -oP '<MicrosoftCodeAnalysisVersion>\K[^<]+' eng/Versions.props | head -n1 || true)
-          fi
-          
-          # Tertiary method: Check Directory.Packages.props 
-          if [ -f Directory.Packages.props ] && [ -z "$VER" ]; then
-            echo "Checking Directory.Packages.props for Microsoft.CodeAnalysis.Common"
-            VER=$(grep 'Microsoft.CodeAnalysis.Common' Directory.Packages.props | grep -oP 'Version="\K[^"]+' | head -n1 || true)
-          fi
-          
-          # Final fallback: Search git log for version bump commits
-          if [ -z "$VER" ]; then
-            echo "Fallback: searching commit messages for version patterns"
-            VER=$(git log --oneline "${{ steps.range.outputs.start }}..${{ steps.range.outputs.end }}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
-          fi
-          
-          echo "Detected Roslyn version: ${VER:-unknown}"
-          popd >/dev/null
-          
-          [ -z "$VER" ] && VER=unknown
-          echo "roslyn=$VER" >> $GITHUB_OUTPUT
 
       - name: Generate PR list
         id: prs
-        if: steps.range.outputs.no_change != 'true'
+        if: steps.latest.outputs.no_change != 'true'
         shell: bash
         run: |
           set -euo pipefail
           pushd roslyn >/dev/null
           
-          if OUTPUT=$(roslyn-tools pr-finder -s "${{ steps.range.outputs.start }}" -e "${{ steps.range.outputs.end }}" --format changelog --label VSCode 2>/dev/null); then
+          # Run pr-finder with VSCode and Add-to-Changelog labels
+          if OUTPUT=$(roslyn-tools pr-finder \
+            -s "${{ steps.current.outputs.start }}" \
+            -e "${{ steps.latest.outputs.end }}" \
+            --format changelog \
+            --label VSCode \
+            --label Add-to-Changelog 2>/dev/null); then
             if [ -z "$OUTPUT" ]; then
-              echo "(no PRs)" > ../pr-changelog.txt
+              echo "(no PRs with required labels)" > ../pr-changelog.txt
             else
               printf "%s\n" "$OUTPUT" > ../pr-changelog.txt
             fi
@@ -144,176 +214,130 @@ jobs:
           popd >/dev/null
           cat pr-changelog.txt
           
-          if grep -qE '^\((no PRs|pr-finder failed)\)$' pr-changelog.txt; then 
+          if grep -qE '^\((no PRs|pr-finder failed)\)' pr-changelog.txt; then 
             echo "empty=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Update CHANGELOG
+      - name: Update CHANGELOG and package.json
         id: update
-        if: steps.range.outputs.no_change != 'true'
+        if: steps.latest.outputs.no_change != 'true'
         uses: actions/github-script@v7
         env:
-          ROSLYN_VER: ${{ steps.rver.outputs.roslyn }}
+          ROSLYN_VER: ${{ steps.latest.outputs.version }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { readFile, writeFile, access } = require('fs/promises');
-            const { constants } = require('fs');
+            const { readFile, writeFile } = require('fs/promises');
             
             const CHANGELOG = 'CHANGELOG.md';
             const PR_FILE = 'pr-changelog.txt';
             const roslynVer = process.env.ROSLYN_VER || 'unknown';
             
-            core.info(`Updating CHANGELOG.md with Roslyn changes (version: ${roslynVer})`);
+            core.info(`Updating with Roslyn version: ${roslynVer}`);
             
+            // Update package.json
             try {
-              // Update package.json first (like the manual PRs do)
-              let pkgUpdated = false;
-              try {
-                const pkg = JSON.parse(await readFile('package.json', 'utf8'));
-                if (!pkg.defaults) pkg.defaults = {};
-                
-                const oldVersion = pkg.defaults.roslyn;
-                core.info(`Current package.json defaults.roslyn: ${oldVersion}`);
-                core.info(`Detected Roslyn version: ${roslynVer}`);
-                
-                // Always update package.json, even if version is 'unknown'
-                if (pkg.defaults.roslyn !== roslynVer) {
-                  core.info(`Updating package.json defaults.roslyn: ${oldVersion} -> ${roslynVer}`);
-                  pkg.defaults.roslyn = roslynVer;
-                  await writeFile('package.json', JSON.stringify(pkg, null, 2) + '\n');
-                  pkgUpdated = true;
-                  core.info('package.json successfully updated');
-                } else {
-                  core.info('package.json defaults.roslyn already up to date');
-                }
-              } catch (err) {
-                core.error(`Could not update package.json: ${err.message}`);
-                core.setFailed(`Failed to update package.json: ${err.message}`);
+              const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+              if (!pkg.defaults) pkg.defaults = {};
+              
+              const oldVersion = pkg.defaults.roslyn;
+              if (oldVersion !== roslynVer) {
+                core.info(`Updating package.json: ${oldVersion} -> ${roslynVer}`);
+                pkg.defaults.roslyn = roslynVer;
+                await writeFile('package.json', JSON.stringify(pkg, null, 2) + '\n');
               }
-              
-              // Load pr-finder output and filter out diff link
-              let prLines = [];
-              try {
-                await access(PR_FILE, constants.F_OK);
-                const prContent = await readFile(PR_FILE, 'utf8');
-                prLines = prContent
-                  .split(/\r?\n/)
-                  .map(l => l.trim())
-                  .filter(l => l.length && !l.includes('[View Complete Diff of Changes]'))
-                  .map(l => l.startsWith('*') ? `  ${l}` : `  * ${l}`); // Convert to sub-bullets
-                core.info(`Found ${prLines.length} PR entries to add`);
-              } catch (err) {
-                core.warning(`Could not read ${PR_FILE}: ${err.message}`);
-              }
-              
-              // Read existing changelog
-              let content;
-              try {
-                content = await readFile(CHANGELOG, 'utf8');
-              } catch (err) {
-                core.setFailed('CHANGELOG.md not found');
-                return;
-              }
-              
-              // Find the existing bump line pattern in the first # section
-              const lines = content.split(/\r?\n/);
-              let bumpLineIndex = -1;
-              let firstHeaderIndex = -1;
-              
-              // Find the first # header
-              for (let i = 0; i < lines.length; i++) {
-                if (/^# /.test(lines[i])) {
-                  firstHeaderIndex = i;
-                  break;
-                }
-              }
-              
-              if (firstHeaderIndex === -1) {
-                core.setFailed('Could not find any # header in CHANGELOG.md');
-                return;
-              }
-              
-              // Find the next # header to determine the end of the first section
-              let sectionEndIndex = lines.length;
-              for (let i = firstHeaderIndex + 1; i < lines.length; i++) {
-                if (/^# /.test(lines[i])) {
-                  sectionEndIndex = i;
-                  break;
-                }
-              }
-              
-              // Look for "Bump Roslyn" line within the first section
-              for (let i = firstHeaderIndex + 1; i < sectionEndIndex; i++) {
-                if (/^\* Bump Roslyn to .* \(PR:/.test(lines[i])) {
-                  bumpLineIndex = i;
-                  break;
-                }
-              }
-              
-              if (bumpLineIndex === -1) {
-                core.setFailed('Could not find existing Roslyn bump line in the first section');
-                return;
-              }
-              
-              // Replace the existing bump line with detected version or placeholder
-              const bumpLine = roslynVer === 'unknown' 
-                ? '* Bump Roslyn (version unresolved) (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))'
-                : `* Bump Roslyn to ${roslynVer} (PR: [#ROSLYN_PR_NUMBER_PLACEHOLDER](ROSLYN_PR_URL_PLACEHOLDER))`;
-              
-              lines[bumpLineIndex] = bumpLine;
-              
-              // Find where existing sub-bullets end (don't remove them, just find the insertion point)
-              let insertionPoint = bumpLineIndex + 1;
-              while (insertionPoint < lines.length && lines[insertionPoint].startsWith('  *')) {
-                insertionPoint++;
-              }
-              
-              // Insert new PR lines after existing sub-bullets
-              if (prLines.length > 0) {
-                lines.splice(insertionPoint, 0, ...prLines);
-              }
-              
-              const finalText = lines.join('\n');
-              await writeFile(CHANGELOG, finalText);
-              core.info('Successfully updated CHANGELOG.md');
-              
             } catch (err) {
-              core.setFailed(`Error updating changelog: ${err?.message ?? err}`);
+              core.setFailed(`Failed to update package.json: ${err.message}`);
+              return;
             }
+            
+            // Load PR list
+            let prLines = [];
+            try {
+              const prContent = await readFile(PR_FILE, 'utf8');
+              prLines = prContent
+                .split(/\r?\n/)
+                .filter(l => l.trim().length && !l.includes('[View Complete Diff'))
+                .map(l => l.startsWith('*') ? `  ${l}` : `  * ${l}`);
+            } catch (err) {
+              core.warning(`Could not read ${PR_FILE}: ${err.message}`);
+            }
+            
+            // Update CHANGELOG
+            const content = await readFile(CHANGELOG, 'utf8');
+            const lines = content.split(/\r?\n/);
+            
+            // Find first section and existing bump line
+            let bumpLineIndex = -1;
+            let firstHeaderIndex = lines.findIndex(l => /^# /.test(l));
+            let nextHeaderIndex = lines.findIndex((l, i) => i > firstHeaderIndex && /^# /.test(l));
+            let sectionEnd = nextHeaderIndex > 0 ? nextHeaderIndex : lines.length;
+            
+            for (let i = firstHeaderIndex + 1; i < sectionEnd; i++) {
+              if (/^\* Bump Roslyn to .* \(PR:/.test(lines[i])) {
+                bumpLineIndex = i;
+                break;
+              }
+            }
+            
+            if (bumpLineIndex === -1) {
+              core.setFailed('Could not find existing Roslyn bump line');
+              return;
+            }
+            
+            // Update bump line
+            lines[bumpLineIndex] = `* Bump Roslyn to ${roslynVer} (PR: [#TBD](TBD))`;
+            
+            // Insert PR lines
+            let insertPoint = bumpLineIndex + 1;
+            while (insertPoint < lines.length && lines[insertPoint].startsWith('  *')) {
+              insertPoint++;
+            }
+            
+            if (prLines.length > 0) {
+              lines.splice(insertPoint, 0, ...prLines);
+            }
+            
+            await writeFile(CHANGELOG, lines.join('\n'));
+            core.info('Successfully updated CHANGELOG.md');
 
       - name: Create PR
-        if: steps.range.outputs.no_change != 'true'
+        if: steps.latest.outputs.no_change != 'true'
         id: cpr
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: roslyn-changes/${{ steps.range.outputs.end }}
-          commit-message: "Roslyn changes: ${{ steps.range.outputs.start }}...${{ steps.range.outputs.end }}"
-          title: "Roslyn changes: ${{ steps.range.outputs.end }}"
+          branch: roslyn-bump/${{ steps.latest.outputs.end }}
+          commit-message: "Bump Roslyn to ${{ steps.latest.outputs.version }}"
+          title: "Bump Roslyn to ${{ steps.latest.outputs.version }}"
           add-paths: |
             CHANGELOG.md
             package.json
           body: |
-            Automated Roslyn update.
-            Range: `${{ steps.range.outputs.start }}` ... `${{ steps.range.outputs.end }}`.
-            See CHANGELOG.md.
+            Automated Roslyn version bump.
+            
+            **Version:** `${{ steps.latest.outputs.version }}`
+            **Commit Range:** `${{ steps.current.outputs.start }}....${{ steps.latest.outputs.end }}`
+            **Azure DevOps Build:** [${{ steps.latest.outputs.build_id }}](${{ steps.latest.outputs.build_url }})
+            
+            See CHANGELOG.md for included PRs.
 
       - name: Backfill PR link in CHANGELOG
-        if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true'
+        if: steps.cpr.outputs.pull-request-number && steps.latest.outputs.no_change != 'true'
         shell: bash
         run: |
           set -euo pipefail
           
           PR_URL="${{ steps.cpr.outputs.pull-request-url }}"
           PR_NUM="${{ steps.cpr.outputs.pull-request-number }}"
-          BRANCH="roslyn-changes/${{ steps.range.outputs.end }}"
+          BRANCH="roslyn-bump/${{ steps.latest.outputs.end }}"
           
           git fetch origin "$BRANCH" --depth=1
           git checkout "$BRANCH"
           
-          sed -i "0,/ROSLYN_PR_NUMBER_PLACEHOLDER/s/ROSLYN_PR_NUMBER_PLACEHOLDER/$PR_NUM/" CHANGELOG.md
-          sed -i "0,/ROSLYN_PR_URL_PLACEHOLDER/s|ROSLYN_PR_URL_PLACEHOLDER|$PR_URL|" CHANGELOG.md
+          # Replace TBD placeholders with actual PR number and URL
+          sed -i "s|#TBD|#$PR_NUM|" CHANGELOG.md
+          sed -i "s|(TBD)|($PR_URL)|" CHANGELOG.md
           
           if git diff --quiet; then
             echo "No placeholder replacement occurred."
@@ -322,28 +346,6 @@ jobs:
           
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add CHANGELOG.md package.json || true
+          git add CHANGELOG.md
           git commit -m "Backfill PR link #$PR_NUM"
           git push origin "$BRANCH"
-
-      - name: Update last processed SHA
-        if: steps.cpr.outputs.pull-request-number && steps.range.outputs.no_change != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          
-          # Store the END SHA for the next run
-          echo "${{ steps.range.outputs.end }}" > .github/roslyn-last-sha.txt
-          
-          # Commit this update to main branch
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add .github/roslyn-last-sha.txt
-          
-          if ! git diff --staged --quiet; then
-            git commit -m "Update last processed Roslyn SHA to ${{ steps.range.outputs.end }}"
-            git push origin main
-            echo "Updated last processed SHA to ${{ steps.range.outputs.end }}"
-          else
-            echo "No changes to commit for SHA tracking"
-          fi
