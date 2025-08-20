@@ -9,17 +9,6 @@ schedules:
         - main
     always: true
 
-resources:
-  pipelines:
-    - pipeline: officialBuildCI
-      source: 327  # Use the pipeline ID directly instead of name
-      project: internal
-      branch: refs/heads/main  # Use full branch reference
-      trigger:
-        branches:
-          include:
-            - refs/heads/main
-
 pool:
   vmImage: ubuntu-latest
 
@@ -27,9 +16,9 @@ variables:
   - name: RoslynStartSHA
     value: ""
   - name: RoslynEndSHA
-    value: $(resources.pipeline.officialBuildCI.sourceCommit)
+    value: ""
   - name: RoslynBuildNumber
-    value: $(resources.pipeline.officialBuildCI.runName)
+    value: ""
   - name: RoslynVersion
     value: ""
 
@@ -49,54 +38,80 @@ stages:
               version: 9.0.x
 
           - task: Bash@3
-            displayName: Install roslyn-tools
+            displayName: Install tools
             inputs:
               targetType: inline
               script: |
                 set -euo pipefail
+                # Install roslyn-tools
                 FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json"
                 dotnet tool install -g Microsoft.RoslynTools --prerelease --add-source "$FEED"
                 echo "##vso[task.prependpath]$HOME/.dotnet/tools"
+                
+                # Install jq for JSON parsing
+                sudo apt-get update && sudo apt-get install -y jq
 
           - task: Bash@3
-            displayName: Get current Roslyn SHA from package
+            displayName: Get latest Roslyn build and version
             inputs:
               targetType: inline
               script: |
                 set -euo pipefail
                 
-                # Read current version from package.json
-                CURRENT_VERSION=$(jq -r '.defaults.roslyn // empty' package.json)
+                echo "Getting latest Roslyn version from NuGet feed..."
                 
-                if [ -z "$CURRENT_VERSION" ]; then
-                  echo "Error: Could not find roslyn version in package.json"
+                # Get the latest version from the dotnet-tools feed
+                PACKAGE_NAME="microsoft.codeanalysis.common"
+                PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+                
+                # Get all versions and pick the latest
+                VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
+                
+                if [ -z "$VERSIONS" ]; then
+                  # Try dotnet8 feed as fallback
+                  PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+                  VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
+                fi
+                
+                # Get the latest prerelease version
+                VERSION=$(echo "$VERSIONS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' | tail -n1)
+                
+                if [ -z "$VERSION" ]; then
+                  echo "Error: Could not find any Roslyn versions in feed"
                   exit 1
                 fi
                 
-                echo "Current Roslyn version: $CURRENT_VERSION"
+                echo "Latest version from feed: $VERSION"
+                echo "##vso[task.setvariable variable=RoslynVersion]$VERSION"
                 
-                # Download and extract commit SHA from NuGet package
+                # Download the package to get commit SHA
                 TEMP_DIR=$(mktemp -d)
                 cd "$TEMP_DIR"
                 
-                PACKAGE_NAME="microsoft.codeanalysis.common"
                 DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
-                PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
+                PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
                 
-                if curl -f -L -o package.nupkg "$PACKAGE_URL"; then
+                if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
                   unzip -q package.nupkg
                   NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
                   if [ -n "$NUSPEC_FILE" ]; then
-                    START_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
-                    if [ -n "$START_SHA" ]; then
-                      echo "##vso[task.setvariable variable=RoslynStartSHA]$START_SHA"
-                      echo "Current Roslyn SHA: $START_SHA"
+                    END_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
+                    if [ -n "$END_SHA" ]; then
+                      echo "##vso[task.setvariable variable=RoslynEndSHA]$END_SHA"
+                      echo "Latest Roslyn SHA: $END_SHA"
                     fi
                   fi
                 fi
                 
                 cd - >/dev/null
                 rm -rf "$TEMP_DIR"
+                
+                # If we couldn't get SHA, use GitHub as fallback
+                if [ -z "$END_SHA" ]; then
+                  echo "Getting latest commit from GitHub..."
+                  END_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha // empty')
+                  echo "##vso[task.setvariable variable=RoslynEndSHA]$END_SHA"
+                fi
 
           - task: DownloadPipelineArtifact@2
             displayName: Download AssetManifests
