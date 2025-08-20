@@ -5,8 +5,8 @@ on:
     - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
-      roslyn_build_id:
-        description: 'Specific Roslyn build ID (optional)'
+      roslyn_version:
+        description: 'Specific Roslyn version (optional)'
         required: false
         type: string
 
@@ -84,27 +84,33 @@ jobs:
         run: |
           set -euo pipefail
           
-          echo "Getting latest Roslyn version from NuGet feed..."
-          
-          # Get the latest version from the dotnet-tools feed
-          PACKAGE_NAME="microsoft.codeanalysis.common"
-          PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2/$PACKAGE_NAME/index.json"
-          
-          # Get all versions and pick the latest
-          VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
-          
-          if [ -z "$VERSIONS" ]; then
-            # Try dotnet8 feed as fallback
-            PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+          # If specific version provided, use it
+          if [ -n "${{ github.event.inputs.roslyn_version }}" ]; then
+            VERSION="${{ github.event.inputs.roslyn_version }}"
+            echo "Using specified version: $VERSION"
+          else
+            echo "Getting latest Roslyn version from NuGet feed..."
+            
+            # Get the latest version from the dotnet-tools feed
+            PACKAGE_NAME="microsoft.codeanalysis.common"
+            PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+            
+            # Get all versions and pick the latest
             VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
-          fi
-          
-          # Get the latest prerelease version
-          VERSION=$(echo "$VERSIONS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' | tail -n1)
-          
-          if [ -z "$VERSION" ]; then
-            echo "Error: Could not find any Roslyn versions in feed"
-            exit 1
+            
+            if [ -z "$VERSIONS" ]; then
+              # Try dotnet8 feed as fallback
+              PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+              VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
+            fi
+            
+            # Get the latest prerelease version
+            VERSION=$(echo "$VERSIONS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' | tail -n1)
+            
+            if [ -z "$VERSION" ]; then
+              echo "Error: Could not find any Roslyn versions in feed"
+              exit 1
+            fi
           fi
           
           echo "Latest version from feed: $VERSION"
@@ -113,6 +119,7 @@ jobs:
           TEMP_DIR=$(mktemp -d)
           cd "$TEMP_DIR"
           
+          PACKAGE_NAME="microsoft.codeanalysis.common"
           DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
           PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
           

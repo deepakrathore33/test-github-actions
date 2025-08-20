@@ -8,32 +8,25 @@ schedules:
         - main
     always: true
 
-# IMPORTANT: Choose one of these pool configurations:
+resources:
+  pipelines:
+    - pipeline: officialBuildCI
+      source: dotnet/roslyn-official
+      project: internal
+      branch: refs/heads/main
 
-# Option 1: Self-hosted agent (no parallelism grant needed)
-# Remove the OS demand since you might not have a Linux agent
 pool:
-  name: Default  # Your agent pool name
-  # Remove the OS demand - let it use any available agent
-
-# Option 2: Microsoft-hosted agent (requires parallelism grant)
-# Uncomment this if you have parallelism grant approved
-# pool:
-#   vmImage: ubuntu-latest
-
-# Option 3: If you have a specific self-hosted agent
-# pool:
-#   name: Default
-#   demands:
-#     - Agent.Name -equals YourAgentName  # Replace with your actual agent name
+  vmImage: ubuntu-latest  # Or use your self-hosted agent pool
 
 variables:
   - name: RoslynStartSHA
     value: ""
   - name: RoslynEndSHA
-    value: ""
+    value: $(resources.pipeline.officialBuildCI.sourceCommit)
   - name: RoslynBuildNumber
-    value: ""
+    value: $(resources.pipeline.officialBuildCI.runName)
+  - name: RoslynBuildId
+    value: $(resources.pipeline.officialBuildCI.runID)
   - name: RoslynVersion
     value: ""
 
@@ -46,6 +39,10 @@ stages:
         steps:
           - checkout: self
             persistCredentials: true
+
+          - download: officialBuildCI
+            artifact: AssetManifests
+            displayName: Download AssetManifests from Roslyn build
 
           - task: UseDotNet@2
             displayName: Install .NET SDK
@@ -67,6 +64,48 @@ stages:
                 sudo apt-get update && sudo apt-get install -y jq
 
           - task: Bash@3
+            displayName: Extract Roslyn version from AssetManifests
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                
+                # The AssetManifests artifact is downloaded to this location
+                ASSET_MANIFEST_PATH="$(Pipeline.Workspace)/officialBuildCI/AssetManifests"
+                
+                # Find OfficialBuild.xml
+                XML_FILE="$ASSET_MANIFEST_PATH/OfficialBuild.xml"
+                
+                if [ ! -f "$XML_FILE" ]; then
+                  echo "Error: OfficialBuild.xml not found at $XML_FILE"
+                  ls -la "$ASSET_MANIFEST_PATH" || echo "AssetManifests directory not found"
+                  exit 1
+                fi
+                
+                # Extract version for Microsoft.CodeAnalysis package
+                VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
+                
+                if [ -z "$VERSION" ]; then
+                  # Try Microsoft.CodeAnalysis.Common
+                  VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis\.Common"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
+                fi
+                
+                if [ -n "$VERSION" ]; then
+                  echo "##vso[task.setvariable variable=RoslynVersion]$VERSION"
+                  echo "Latest Roslyn version from AssetManifest: $VERSION"
+                else
+                  echo "Error: Could not extract version from AssetManifest"
+                  exit 1
+                fi
+                
+                # Also extract and verify commit from Build element
+                COMMIT=$(grep -oP '<Build[^>]*Commit="\K[^"]+' "$XML_FILE" | head -n1)
+                if [ -n "$COMMIT" ]; then
+                  echo "Commit from AssetManifest: $COMMIT"
+                  echo "Pipeline sourceCommit: $(RoslynEndSHA)"
+                fi
+
+          - task: Bash@3
             displayName: Get current Roslyn SHA from package
             inputs:
               targetType: inline
@@ -77,12 +116,12 @@ stages:
                 CURRENT_VERSION=$(jq -r '.defaults.roslyn // empty' package.json)
                 
                 if [ -z "$CURRENT_VERSION" ]; then
-                  echo "Error: Could not find roslyn version in package.json"
-                  exit 1
+                  echo "No roslyn version in package.json, this is first run"
+                  echo "##vso[task.setvariable variable=RoslynStartSHA]0000000000000000000000000000000000000000"
+                  exit 0
                 fi
                 
                 echo "Current Roslyn version: $CURRENT_VERSION"
-                echo "##vso[task.setvariable variable=RoslynStartSHA]$CURRENT_VERSION"
                 
                 # Download and extract commit SHA from NuGet package
                 TEMP_DIR=$(mktemp -d)
@@ -92,7 +131,7 @@ stages:
                 DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
                 PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
                 
-                if curl -f -L -o package.nupkg "$PACKAGE_URL"; then
+                if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
                   unzip -q package.nupkg
                   NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
                   if [ -n "$NUSPEC_FILE" ]; then
