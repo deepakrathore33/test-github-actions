@@ -195,13 +195,12 @@ jobs:
           set -euo pipefail
           pushd roslyn >/dev/null
           
-          # Run pr-finder with VSCode and Add-to-Changelog labels
+          # Run pr-finder with VSCode label only
           if OUTPUT=$(roslyn-tools pr-finder \
             -s "${{ steps.current.outputs.start }}" \
             -e "${{ steps.latest.outputs.end }}" \
             --format changelog \
-            --label VSCode \
-            --label Add-to-Changelog 2>/dev/null); then
+            --label VSCode 2>/dev/null); then
             if [ -z "$OUTPUT" ]; then
               echo "(no PRs with required labels)" > ../pr-changelog.txt
             else
