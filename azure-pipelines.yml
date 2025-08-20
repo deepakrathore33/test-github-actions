@@ -8,15 +8,19 @@ schedules:
         - main
     always: true
 
-# Use self-hosted agent if available, otherwise use Microsoft-hosted
-# Note: For Microsoft-hosted agents, you need to request free parallelism at:
-# https://aka.ms/azpipelines-parallelism-request
+# IMPORTANT: Choose one of these pool configurations:
+
+# Option 1: Self-hosted agent (no parallelism grant needed)
+# Uncomment this section and comment out Option 2
 pool:
-  # Option 1: Use self-hosted agent (no parallelism grant needed)
-  # name: Default  # Replace with your agent pool name
-  
-  # Option 2: Use Microsoft-hosted agent (requires parallelism grant)
-  vmImage: ubuntu-latest
+  name: Default  # Replace with your actual agent pool name
+  demands:
+    - agent.os -equals Linux  # Or Windows/macOS depending on your agent
+
+# Option 2: Microsoft-hosted agent (requires parallelism grant)
+# Comment this out if using self-hosted agent
+# pool:
+#   vmImage: ubuntu-latest
 
 variables:
   - name: RoslynStartSHA
