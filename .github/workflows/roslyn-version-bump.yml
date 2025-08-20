@@ -118,89 +118,141 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Get latest Roslyn version from NuGet feed directly
-          echo "Getting latest Roslyn version from NuGet feed..."
+          # Get latest Roslyn version from official build pipeline's AssetManifests
+          echo "Getting latest Roslyn build from Azure DevOps..."
           
-          # Query the dotnet-tools feed for latest Microsoft.CodeAnalysis.Common package
-          PACKAGE_NAME="microsoft.codeanalysis.common"
-          FEED_URL="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json"
+          # The dotnet-roslyn-official pipeline is in the internal project
+          # But we can access its builds via the public API endpoint
+          AZDO_ORG="https://dev.azure.com/dnceng"
           
-          # Get feed service index
-          FEED_INDEX=$(curl -s "$FEED_URL")
+          # First, try to get the latest build from the dotnet-roslyn CI feed
+          # This feed aggregates builds from various pipelines
+          echo "Querying for latest Roslyn build..."
           
-          # Extract the SearchQueryService URL
-          SEARCH_URL=$(echo "$FEED_INDEX" | jq -r '.resources[] | select(."@type" | contains("SearchQueryService")) | ."@id"' | head -n1)
+          # Use the public Roslyn builds endpoint
+          # The builds are accessible without auth even though they're in internal project
+          BUILD_URL="https://dev.azure.com/dnceng/public/_apis/build/builds?definitions=15&branchName=refs/heads/main&\$top=5&api-version=7.0"
           
-          if [ -z "$SEARCH_URL" ]; then
-            # Fallback to direct package index
-            echo "Using direct package index..."
+          # Get recent builds and find one with artifacts
+          BUILDS=$(curl -s "$BUILD_URL")
+          BUILD_ID=""
+          
+          # Try to find a build with artifacts
+          for id in $(echo "$BUILDS" | jq -r '.value[].id'); do
+            ARTIFACT_CHECK="https://dev.azure.com/dnceng/public/_apis/build/builds/$id/artifacts?api-version=7.0"
+            if curl -s "$ARTIFACT_CHECK" | jq -e '.count > 0' >/dev/null 2>&1; then
+              BUILD_ID="$id"
+              echo "Found build with artifacts: $BUILD_ID"
+              break
+            fi
+          done
+          
+          # If no builds found in public, we need to use a different approach
+          # Query the NuGet feed for the latest package and extract metadata from it
+          if [ -z "$BUILD_ID" ]; then
+            echo "No public builds found, querying NuGet feed for latest package..."
+            
+            # Get the latest version from the dotnet-tools feed package index
+            PACKAGE_NAME="microsoft.codeanalysis.common"
             PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+            
+            # Get all versions and pick the latest
             VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
             
             if [ -z "$VERSIONS" ]; then
-              # Try the dotnet8 feed as fallback
+              # Try dotnet8 feed
               PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2/$PACKAGE_NAME/index.json"
               VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
             fi
             
-            # Get the latest version (last in the list, filtering prereleases)
+            # Get the latest prerelease version
             VERSION=$(echo "$VERSIONS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' | tail -n1)
-          else
-            # Query for the package
-            SEARCH_RESULT=$(curl -s "${SEARCH_URL}?q=$PACKAGE_NAME&prerelease=true&take=1")
-            VERSION=$(echo "$SEARCH_RESULT" | jq -r '.data[0].version // empty')
-          fi
-          
-          if [ -z "$VERSION" ]; then
-            echo "Error: Could not get latest Roslyn version from feed"
-            # Use a fallback - get latest from GitHub
-            echo "Falling back to GitHub for latest version"
-            VERSION="5.0.0-dev"
-          fi
-          
-          echo "Latest Roslyn version from feed: $VERSION"
-          
-          # Now download this package to get the commit SHA
-          TEMP_DIR=$(mktemp -d)
-          cd "$TEMP_DIR"
-          
-          echo "Downloading package to extract commit SHA..."
-          DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
-          PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
-          
-          END_SHA=""
-          if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
-            unzip -q package.nupkg
-            NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
-            if [ -n "$NUSPEC_FILE" ]; then
-              END_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
-              echo "Extracted commit SHA from package: $END_SHA"
-            fi
-          fi
-          
-          cd - >/dev/null
-          rm -rf "$TEMP_DIR"
-          
-          # If we couldn't get SHA from package, get latest from GitHub
-          if [ -z "$END_SHA" ] || [ "$END_SHA" = "null" ]; then
-            echo "Getting latest commit from GitHub..."
-            END_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha // empty')
             
-            if [ -z "$END_SHA" ]; then
-              echo "Error: Could not get latest commit SHA"
-              exit 1
+            if [ -z "$VERSION" ]; then
+              echo "Error: Could not find any Roslyn versions in feed"
+              VERSION="5.0.0-dev"
             fi
+            
+            echo "Latest version from feed: $VERSION"
+            
+            # Download the package to get commit SHA
+            TEMP_DIR=$(mktemp -d)
+            cd "$TEMP_DIR"
+            
+            DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
+            PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
+            
+            END_SHA=""
+            if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
+              unzip -q package.nupkg
+              NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
+              if [ -n "$NUSPEC_FILE" ]; then
+                END_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
+              fi
+            fi
+            
+            cd - >/dev/null
+            rm -rf "$TEMP_DIR"
+            
+            # If still no SHA, get from GitHub
+            if [ -z "$END_SHA" ]; then
+              echo "Getting latest commit from GitHub..."
+              END_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha // empty')
+            fi
+            
+            echo "end=$END_SHA" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "build_id=feed" >> $GITHUB_OUTPUT
+            echo "build_url=https://github.com/dotnet/roslyn/commit/$END_SHA" >> $GITHUB_OUTPUT
+            echo "build_number=$VERSION" >> $GITHUB_OUTPUT
+            
+          else
+            # We found a build with artifacts, get its details
+            BUILD_DETAILS=$(curl -s "https://dev.azure.com/dnceng/public/_apis/build/builds/$BUILD_ID?api-version=7.0")
+            
+            END_SHA=$(echo "$BUILD_DETAILS" | jq -r '.sourceVersion // empty')
+            BUILD_NUMBER=$(echo "$BUILD_DETAILS" | jq -r '.buildNumber // empty')
+            
+            echo "Build commit: $END_SHA"
+            echo "Build number: $BUILD_NUMBER"
+            
+            # Try to download AssetManifests artifact
+            ARTIFACTS_URL="https://dev.azure.com/dnceng/public/_apis/build/builds/$BUILD_ID/artifacts?api-version=7.0"
+            ARTIFACT_LIST=$(curl -s "$ARTIFACTS_URL")
+            
+            # Look for AssetManifests or any artifact with version info
+            VERSION=""
+            MANIFEST_URL=$(echo "$ARTIFACT_LIST" | jq -r '.value[] | select(.name | contains("Manifest")) | .resource.downloadUrl // empty' | head -n1)
+            
+            if [ -n "$MANIFEST_URL" ]; then
+              TEMP_DIR=$(mktemp -d)
+              cd "$TEMP_DIR"
+              
+              if curl -L -o manifest.zip "$MANIFEST_URL" 2>/dev/null && unzip -q manifest.zip 2>/dev/null; then
+                XML_FILE=$(find . -name "*.xml" | head -n1)
+                if [ -n "$XML_FILE" ]; then
+                  VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis[^"]*"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
+                fi
+              fi
+              
+              cd - >/dev/null
+              rm -rf "$TEMP_DIR"
+            fi
+            
+            # Fallback to construct version from build number
+            if [ -z "$VERSION" ]; then
+              VERSION="5.0.0-ci.$BUILD_NUMBER"
+            fi
+            
+            echo "end=$END_SHA" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+            echo "build_url=https://dev.azure.com/dnceng/public/_build/results?buildId=$BUILD_ID" >> $GITHUB_OUTPUT
+            echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
           fi
           
-          echo "end=$END_SHA" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Latest Roslyn commit: $END_SHA"
           echo "Latest Roslyn version: $VERSION"
-          
-          # For build metadata, use GitHub commit URL
-          echo "build_id=github" >> $GITHUB_OUTPUT
-          echo "build_url=https://github.com/dotnet/roslyn/commit/$END_SHA" >> $GITHUB_OUTPUT
-          echo "build_number=$VERSION" >> $GITHUB_OUTPUT
           
           if [ "${{ steps.current.outputs.start }}" = "$END_SHA" ]; then
             echo "no_change=true" >> $GITHUB_OUTPUT
