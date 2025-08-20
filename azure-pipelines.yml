@@ -11,16 +11,21 @@ schedules:
 # IMPORTANT: Choose one of these pool configurations:
 
 # Option 1: Self-hosted agent (no parallelism grant needed)
-# Uncomment this section and comment out Option 2
+# Remove the OS demand since you might not have a Linux agent
 pool:
-  name: Default  # Replace with your actual agent pool name
-  demands:
-    - agent.os -equals Linux  # Or Windows/macOS depending on your agent
+  name: Default  # Your agent pool name
+  # Remove the OS demand - let it use any available agent
 
 # Option 2: Microsoft-hosted agent (requires parallelism grant)
-# Comment this out if using self-hosted agent
+# Uncomment this if you have parallelism grant approved
 # pool:
 #   vmImage: ubuntu-latest
+
+# Option 3: If you have a specific self-hosted agent
+# pool:
+#   name: Default
+#   demands:
+#     - Agent.Name -equals YourAgentName  # Replace with your actual agent name
 
 variables:
   - name: RoslynStartSHA
