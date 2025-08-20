@@ -52,21 +52,61 @@ jobs:
           echo "Current Roslyn version: $CURRENT_VERSION"
           
           # Download and extract the NuGet package to get the SHA
+          # This matches the approach in createTagsTasks.ts#L217
           TEMP_DIR=$(mktemp -d)
           cd "$TEMP_DIR"
           
-          # Download the package
-          curl -L -o package.nupkg "https://api.nuget.org/v3-flatcontainer/microsoft.codeanalysis.common/$CURRENT_VERSION/microsoft.codeanalysis.common.$CURRENT_VERSION.nupkg"
+          # Download the package from NuGet
+          PACKAGE_NAME="microsoft.codeanalysis.common"
+          PACKAGE_URL="https://api.nuget.org/v3-flatcontainer/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
           
-          # Extract and get SHA from package metadata (similar to createTagsTasks.ts#L217)
+          echo "Downloading package from: $PACKAGE_URL"
+          if ! curl -f -L -o package.nupkg "$PACKAGE_URL"; then
+            echo "Error: Failed to download package from NuGet"
+            exit 1
+          fi
+          
+          # Extract the package
           unzip -q package.nupkg
-          START_SHA=$(grep -oP 'repository.*commit="\K[^"]+' *.nuspec | head -n1 || echo "")
+          
+          # Following the same approach as createTagsTasks.ts:
+          # Look for buildinfo.json which contains the commit SHA
+          if [ -f "buildinfo.json" ]; then
+            # Extract commit SHA from buildinfo.json
+            START_SHA=$(jq -r '.commitHash // empty' buildinfo.json)
+            echo "Found SHA in buildinfo.json: $START_SHA"
+          else
+            # Fallback: try to find in the nuspec file
+            NUSPEC_FILE=$(find . -name "*.nuspec" | head -n1)
+            if [ -n "$NUSPEC_FILE" ]; then
+              # Look for repository commit in nuspec
+              START_SHA=$(grep -oP '<repository[^>]*commit="\K[^"]+' "$NUSPEC_FILE" | head -n1 || echo "")
+              if [ -n "$START_SHA" ]; then
+                echo "Found SHA in nuspec: $START_SHA"
+              fi
+            fi
+          fi
+          
+          # Additional fallback: check for .version file (common in .NET packages)
+          if [ -z "$START_SHA" ] && [ -f ".version" ]; then
+            START_SHA=$(jq -r '.commitHash // empty' .version 2>/dev/null || echo "")
+            if [ -n "$START_SHA" ]; then
+              echo "Found SHA in .version file: $START_SHA"
+            fi
+          fi
           
           cd - >/dev/null
           rm -rf "$TEMP_DIR"
           
           if [ -z "$START_SHA" ]; then
             echo "Error: Could not extract SHA from current package"
+            echo "Package may not contain commit information"
+            exit 1
+          fi
+          
+          # Validate SHA format (should be 40 hex characters)
+          if ! echo "$START_SHA" | grep -qE '^[a-f0-9]{40}$'; then
+            echo "Error: Invalid SHA format: $START_SHA"
             exit 1
           fi
           
