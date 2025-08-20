@@ -44,15 +44,9 @@ jobs:
           # Read current version from package.json
           CURRENT_VERSION=$(jq -r '.defaults.roslyn // empty' package.json)
           
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "Error: Could not find roslyn version in package.json"
-            exit 1
-          fi
-          
           echo "Current Roslyn version: $CURRENT_VERSION"
           
           # Download the NuGet package and extract commit SHA from .nuspec file
-          
           TEMP_DIR=$(mktemp -d)
           cd "$TEMP_DIR"
           
@@ -64,50 +58,22 @@ jobs:
           DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
           PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
           
-          if ! curl -f -L -o package.nupkg "$PACKAGE_URL"; then
-            echo "Error: Could not download package $PACKAGE_NAME version $CURRENT_VERSION"
-            echo "For testing, using placeholder SHA"
-            START_SHA="0000000000000000000000000000000000000000"
-            echo "start=$START_SHA" >> $GITHUB_OUTPUT
-            cd - >/dev/null
-            rm -rf "$TEMP_DIR"
-            exit 0
-          fi
-          
+          curl -f -L -o package.nupkg "$PACKAGE_URL"
           echo "Package downloaded successfully"
           
           # Extract the package
           unzip -q package.nupkg
           
-          # Find the .nuspec file (following createTagsTasks.ts logic)
+          # Find the .nuspec file
           NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
-          
-          if [ -z "$NUSPEC_FILE" ]; then
-            echo "Error: No .nuspec file found in package"
-            exit 1
-          fi
-          
           echo "Found nuspec file: $NUSPEC_FILE"
           
-          # Extract commit SHA from .nuspec file using the same regex pattern as createTagsTasks.ts
+          # Extract commit SHA from .nuspec file
           # Looking for: repository type="git" url="..." commit="SHA"
-          START_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
-          
-          if [ -z "$START_SHA" ]; then
-            echo "Warning: Could not extract commit SHA from nuspec file"
-            cat "$NUSPEC_FILE" | grep -i repository || echo "No repository element found"
-            echo "Using placeholder SHA for testing"
-            START_SHA="0000000000000000000000000000000000000000"
-          fi
+          START_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1)
           
           cd - >/dev/null
           rm -rf "$TEMP_DIR"
-          
-          # Validate SHA format
-          if ! echo "$START_SHA" | grep -qE '^[a-f0-9]{40}$'; then
-            echo "Warning: Invalid SHA format: $START_SHA"
-            START_SHA="0000000000000000000000000000000000000000"
-          fi
           
           echo "start=$START_SHA" >> $GITHUB_OUTPUT
           echo "Current Roslyn SHA from nuspec: $START_SHA"
@@ -145,111 +111,7 @@ jobs:
               echo "Found build with artifacts: $BUILD_ID"
               break
             fi
-          done
-          
-          # If no builds found in public, we need to use a different approach
-          # Query the NuGet feed for the latest package and extract metadata from it
-          if [ -z "$BUILD_ID" ]; then
-            echo "No public builds found, querying NuGet feed for latest package..."
-            
-            # Get the latest version from the dotnet-tools feed package index
-            PACKAGE_NAME="microsoft.codeanalysis.common"
-            PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2/$PACKAGE_NAME/index.json"
-            
-            # Get all versions and pick the latest
-            VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
-            
-            if [ -z "$VERSIONS" ]; then
-              # Try dotnet8 feed
-              PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2/$PACKAGE_NAME/index.json"
-              VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
-            fi
-            
-            # Get the latest prerelease version
-            VERSION=$(echo "$VERSIONS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' | tail -n1)
-            
-            if [ -z "$VERSION" ]; then
-              echo "Error: Could not find any Roslyn versions in feed"
-              VERSION="5.0.0-dev"
-            fi
-            
-            echo "Latest version from feed: $VERSION"
-            
-            # Download the package to get commit SHA
-            TEMP_DIR=$(mktemp -d)
-            cd "$TEMP_DIR"
-            
-            DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
-            PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
-            
-            END_SHA=""
-            if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
-              unzip -q package.nupkg
-              NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
-              if [ -n "$NUSPEC_FILE" ]; then
-                END_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
-              fi
-            fi
-            
-            cd - >/dev/null
-            rm -rf "$TEMP_DIR"
-            
-            # If still no SHA, get from GitHub
-            if [ -z "$END_SHA" ]; then
-              echo "Getting latest commit from GitHub..."
-              END_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha // empty')
-            fi
-            
-            echo "end=$END_SHA" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "build_id=feed" >> $GITHUB_OUTPUT
-            echo "build_url=https://github.com/dotnet/roslyn/commit/$END_SHA" >> $GITHUB_OUTPUT
-            echo "build_number=$VERSION" >> $GITHUB_OUTPUT
-            
-          else
-            # We found a build with artifacts, get its details
-            BUILD_DETAILS=$(curl -s "https://dev.azure.com/dnceng/public/_apis/build/builds/$BUILD_ID?api-version=7.0")
-            
-            END_SHA=$(echo "$BUILD_DETAILS" | jq -r '.sourceVersion // empty')
-            BUILD_NUMBER=$(echo "$BUILD_DETAILS" | jq -r '.buildNumber // empty')
-            
-            echo "Build commit: $END_SHA"
-            echo "Build number: $BUILD_NUMBER"
-            
-            # Try to download AssetManifests artifact
-            ARTIFACTS_URL="https://dev.azure.com/dnceng/public/_apis/build/builds/$BUILD_ID/artifacts?api-version=7.0"
-            ARTIFACT_LIST=$(curl -s "$ARTIFACTS_URL")
-            
-            # Look for AssetManifests or any artifact with version info
-            VERSION=""
-            MANIFEST_URL=$(echo "$ARTIFACT_LIST" | jq -r '.value[] | select(.name | contains("Manifest")) | .resource.downloadUrl // empty' | head -n1)
-            
-            if [ -n "$MANIFEST_URL" ]; then
-              TEMP_DIR=$(mktemp -d)
-              cd "$TEMP_DIR"
-              
-              if curl -L -o manifest.zip "$MANIFEST_URL" 2>/dev/null && unzip -q manifest.zip 2>/dev/null; then
-                XML_FILE=$(find . -name "*.xml" | head -n1)
-                if [ -n "$XML_FILE" ]; then
-                  VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis[^"]*"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
-                fi
-              fi
-              
-              cd - >/dev/null
-              rm -rf "$TEMP_DIR"
-            fi
-            
-            # Fallback to construct version from build number
-            if [ -z "$VERSION" ]; then
-              VERSION="5.0.0-ci.$BUILD_NUMBER"
-            fi
-            
-            echo "end=$END_SHA" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-            echo "build_url=https://dev.azure.com/dnceng/public/_build/results?buildId=$BUILD_ID" >> $GITHUB_OUTPUT
-            echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
-          fi
+          done    
           
           echo "Latest Roslyn commit: $END_SHA"
           echo "Latest Roslyn version: $VERSION"
