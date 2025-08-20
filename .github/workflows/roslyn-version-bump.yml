@@ -51,7 +51,6 @@ jobs:
           
           echo "Current Roslyn version: $CURRENT_VERSION"
           
-          # Following the approach from vscode-csharp's createTagsTasks.ts getCommitFromNugetAsync
           # Download the NuGet package and extract commit SHA from .nuspec file
           
           TEMP_DIR=$(mktemp -d)
@@ -60,41 +59,13 @@ jobs:
           # The package name used in vscode-csharp
           PACKAGE_NAME="microsoft.codeanalysis.common"
           
-          # Try to download the package - first from public feeds that have Roslyn packages
-          PACKAGE_DOWNLOADED=false
-          
-          # Method 1: Try dotnet-tools feed (where Roslyn packages are published)
-          echo "Attempting to download from dotnet-tools feed..."
+          # Download from dotnet-tools feed (where Roslyn packages are published)
+          echo "Downloading from dotnet-tools feed..."
           DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
           PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
-          if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
-            echo "Downloaded from dotnet-tools feed"
-            PACKAGE_DOWNLOADED=true
-          fi
           
-          # Method 2: Try nuget.org (for released versions)
-          if [ "$PACKAGE_DOWNLOADED" = false ]; then
-            echo "Attempting to download from nuget.org..."
-            NUGET_URL="https://api.nuget.org/v3-flatcontainer/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
-            if curl -f -L -o package.nupkg "$NUGET_URL" 2>/dev/null; then
-              echo "Downloaded from nuget.org"
-              PACKAGE_DOWNLOADED=true
-            fi
-          fi
-          
-          # Method 3: Try dotnet8 feed
-          if [ "$PACKAGE_DOWNLOADED" = false ]; then
-            echo "Attempting to download from dotnet8 feed..."
-            DOTNET8_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2"
-            PACKAGE_URL="$DOTNET8_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
-            if curl -f -L -o package.nupkg "$PACKAGE_URL" 2>/dev/null; then
-              echo "Downloaded from dotnet8 feed"
-              PACKAGE_DOWNLOADED=true
-            fi
-          fi
-          
-          if [ "$PACKAGE_DOWNLOADED" = false ]; then
-            echo "Error: Could not download package $PACKAGE_NAME version $CURRENT_VERSION from any feed"
+          if ! curl -f -L -o package.nupkg "$PACKAGE_URL"; then
+            echo "Error: Could not download package $PACKAGE_NAME version $CURRENT_VERSION"
             echo "For testing, using placeholder SHA"
             START_SHA="0000000000000000000000000000000000000000"
             echo "start=$START_SHA" >> $GITHUB_OUTPUT
@@ -102,6 +73,8 @@ jobs:
             rm -rf "$TEMP_DIR"
             exit 0
           fi
+          
+          echo "Package downloaded successfully"
           
           # Extract the package
           unzip -q package.nupkg
@@ -119,11 +92,6 @@ jobs:
           # Extract commit SHA from .nuspec file using the same regex pattern as createTagsTasks.ts
           # Looking for: repository type="git" url="..." commit="SHA"
           START_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
-          
-          if [ -z "$START_SHA" ]; then
-            # Try alternative patterns
-            START_SHA=$(grep -oP 'commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
-          fi
           
           if [ -z "$START_SHA" ]; then
             echo "Warning: Could not extract commit SHA from nuspec file"
@@ -150,15 +118,11 @@ jobs:
         run: |
           set -euo pipefail
           
-          # This step mimics what Azure Pipelines would provide via:
-          # $(resources.pipeline.officialBuildCI.sourceCommit)
-          # $(resources.pipeline.officialBuildCI.runName)
-          
           # Get the latest successful build from dotnet-roslyn-official pipeline
-          # Pipeline definition ID: 327 (from the reference)
+          # This mimics Azure Pipelines resource pipeline functionality
           AZDO_ORG="https://dev.azure.com/dnceng"
           PROJECT="internal"
-          PIPELINE_ID="327"
+          PIPELINE_ID="327"  # dotnet-roslyn-official pipeline ID
           
           # If specific build ID provided, use it; otherwise get latest
           if [ -n "${{ github.event.inputs.roslyn_build_id }}" ]; then
@@ -166,68 +130,103 @@ jobs:
             echo "Using specified build ID: $BUILD_ID"
           else
             # Get latest successful build from main branch
-            # This is equivalent to Azure Pipelines resource with branch: main
+            # Note: The internal project API is public for read access
             BUILDS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds?definitions=$PIPELINE_ID&branchName=refs/heads/main&statusFilter=completed&resultFilter=succeeded&\$top=1&api-version=7.0"
-            BUILD_INFO=$(curl -s "$BUILDS_URL")
-            BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id')
-            BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber')
+            echo "Fetching from: $BUILDS_URL"
+            
+            # Use anonymous access (no auth header needed for public read)
+            BUILD_INFO=$(curl -s -H "Accept: application/json" "$BUILDS_URL")
+            
+            # Check if we got valid JSON
+            if ! echo "$BUILD_INFO" | jq empty 2>/dev/null; then
+              echo "Error: Invalid JSON response from Azure DevOps"
+              echo "Response preview: ${BUILD_INFO:0:500}"
+              # Try fallback to get latest from GitHub commits
+              echo "Falling back to GitHub API for latest commit"
+              END_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha')
+              echo "end=$END_SHA" >> $GITHUB_OUTPUT
+              echo "version=latest" >> $GITHUB_OUTPUT
+              echo "build_id=unknown" >> $GITHUB_OUTPUT
+              echo "build_url=https://github.com/dotnet/roslyn/commits/main" >> $GITHUB_OUTPUT
+              echo "build_number=unknown" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id // empty')
+            BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber // empty')
+            
+            if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
+              echo "Warning: Could not get build from internal project, trying public project"
+              # Fallback to public project Roslyn CI
+              PROJECT="public"
+              PIPELINE_ID="15"
+              BUILDS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds?definitions=$PIPELINE_ID&branchName=refs/heads/main&statusFilter=completed&resultFilter=succeeded&\$top=1&api-version=7.0"
+              BUILD_INFO=$(curl -s -H "Accept: application/json" "$BUILDS_URL")
+              BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id // empty')
+              BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber // empty')
+            fi
+            
             echo "Latest build: $BUILD_NUMBER (ID: $BUILD_ID)"
           fi
           
           # Get build details
           BUILD_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID?api-version=7.0"
-          BUILD_DETAILS=$(curl -s "$BUILD_URL")
+          BUILD_DETAILS=$(curl -s -H "Accept: application/json" "$BUILD_URL")
           
-          # Extract END SHA (sourceVersion) - equivalent to $(resources.pipeline.officialBuildCI.sourceCommit)
-          END_SHA=$(echo "$BUILD_DETAILS" | jq -r '.sourceVersion')
-          # Extract build number - equivalent to $(resources.pipeline.officialBuildCI.runName)
-          BUILD_NUMBER=$(echo "$BUILD_DETAILS" | jq -r '.buildNumber')
+          # Extract commit SHA (equivalent to $(resources.pipeline.officialBuildCI.sourceCommit))
+          END_SHA=$(echo "$BUILD_DETAILS" | jq -r '.sourceVersion // empty')
+          BUILD_NUMBER=$(echo "$BUILD_DETAILS" | jq -r '.buildNumber // empty')
+          
+          if [ -z "$END_SHA" ] || [ "$END_SHA" = "null" ]; then
+            echo "Error: Could not get source version from build"
+            exit 1
+          fi
           
           echo "end=$END_SHA" >> $GITHUB_OUTPUT
           echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
           echo "Latest Roslyn commit (sourceCommit): $END_SHA"
-          echo "Build number (runName): $BUILD_NUMBER"
+          echo "Build number: $BUILD_NUMBER"
           
-          # Download AssetManifests artifact to get version
-          # This is what would be downloaded via pipeline artifact input in Azure Pipelines
-          ARTIFACTS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?artifactName=AssetManifests&api-version=7.0"
-          ARTIFACT_INFO=$(curl -s "$ARTIFACTS_URL")
-          DOWNLOAD_URL=$(echo "$ARTIFACT_INFO" | jq -r '.resource.downloadUrl')
+          # Try to download AssetManifests artifact to get exact version
+          ARTIFACTS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?api-version=7.0"
+          ARTIFACT_LIST=$(curl -s -H "Accept: application/json" "$ARTIFACTS_URL")
           
-          if [ "$DOWNLOAD_URL" = "null" ] || [ -z "$DOWNLOAD_URL" ]; then
-            echo "Warning: AssetManifests artifact not found, checking for alternate location"
-            # Try without specific artifact name
-            ARTIFACTS_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?api-version=7.0"
-            ARTIFACT_LIST=$(curl -s "$ARTIFACTS_URL")
-            echo "Available artifacts: $(echo "$ARTIFACT_LIST" | jq -r '.value[].name')"
+          # Look for AssetManifests artifact
+          ASSET_MANIFEST_URL=$(echo "$ARTIFACT_LIST" | jq -r '.value[] | select(.name=="AssetManifests") | .resource.downloadUrl // empty' | head -n1)
+          
+          if [ -n "$ASSET_MANIFEST_URL" ] && [ "$ASSET_MANIFEST_URL" != "null" ]; then
+            echo "Found AssetManifests artifact, downloading..."
+            TEMP_DIR=$(mktemp -d)
+            cd "$TEMP_DIR"
             
-            # Look for AssetManifests in the list
-            DOWNLOAD_URL=$(echo "$ARTIFACT_LIST" | jq -r '.value[] | select(.name=="AssetManifests") | .resource.downloadUrl')
+            # Download and extract AssetManifests
+            if curl -L -o assetmanifests.zip "$ASSET_MANIFEST_URL" 2>/dev/null && unzip -q assetmanifests.zip 2>/dev/null; then
+              # Parse OfficialBuild.xml to get version
+              XML_FILE=$(find . -name "OfficialBuild.xml" -o -name "officialBuild.xml" | head -n1)
+              if [ -n "$XML_FILE" ]; then
+                # Extract version for Microsoft.CodeAnalysis.Common package
+                VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis\.Common"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
+                if [ -z "$VERSION" ]; then
+                  # Try alternative pattern
+                  VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
+                fi
+                
+                # Also extract commit from the Build element for verification
+                MANIFEST_COMMIT=$(grep -oP '<Build[^>]*Commit="\K[^"]+' "$XML_FILE" | head -n1)
+                if [ -n "$MANIFEST_COMMIT" ]; then
+                  echo "Commit from AssetManifest: $MANIFEST_COMMIT"
+                fi
+              fi
+            fi
+            
+            cd - >/dev/null
+            rm -rf "$TEMP_DIR"
           fi
           
-          # Download and extract AssetManifests
-          TEMP_DIR=$(mktemp -d)
-          cd "$TEMP_DIR"
-          curl -L -o assetmanifests.zip "$DOWNLOAD_URL"
-          unzip -q assetmanifests.zip
-          
-          # Parse OfficialBuild.xml to get version (as Joey mentioned)
-          if [ -f "AssetManifests/OfficialBuild.xml" ]; then
-            VERSION=$(grep -oP 'Id="Microsoft.CodeAnalysis.Common".*Version="\K[^"]+' AssetManifests/OfficialBuild.xml | head -n1)
-          elif [ -f "OfficialBuild.xml" ]; then
-            VERSION=$(grep -oP 'Id="Microsoft.CodeAnalysis.Common".*Version="\K[^"]+' OfficialBuild.xml | head -n1)
-          else
-            echo "Warning: Could not find OfficialBuild.xml"
-            # Try to extract from build number as fallback
-            VERSION=$(echo "$BUILD_NUMBER" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-          fi
-          
-          cd - >/dev/null
-          rm -rf "$TEMP_DIR"
-          
+          # If we couldn't get version from AssetManifests, extract from build number
           if [ -z "$VERSION" ]; then
-            echo "Error: Could not extract version from AssetManifests"
-            exit 1
+            echo "Warning: Could not get version from AssetManifests, extracting from build number"
+            VERSION=$(echo "$BUILD_NUMBER" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+' || echo "$BUILD_NUMBER")
           fi
           
           echo "version=$VERSION" >> $GITHUB_OUTPUT
