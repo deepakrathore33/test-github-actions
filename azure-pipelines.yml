@@ -1,5 +1,4 @@
-trigger:
-  - none
+trigger: none
 
 schedules:
   - cron: "0 9 * * *"
@@ -9,7 +8,14 @@ schedules:
         - main
     always: true
 
+# Use self-hosted agent if available, otherwise use Microsoft-hosted
+# Note: For Microsoft-hosted agents, you need to request free parallelism at:
+# https://aka.ms/azpipelines-parallelism-request
 pool:
+  # Option 1: Use self-hosted agent (no parallelism grant needed)
+  # name: Default  # Replace with your agent pool name
+  
+  # Option 2: Use Microsoft-hosted agent (requires parallelism grant)
   vmImage: ubuntu-latest
 
 variables:
@@ -50,6 +56,47 @@ stages:
                 
                 # Install jq for JSON parsing
                 sudo apt-get update && sudo apt-get install -y jq
+
+          - task: Bash@3
+            displayName: Get current Roslyn SHA from package
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                
+                # Read current version from package.json
+                CURRENT_VERSION=$(jq -r '.defaults.roslyn // empty' package.json)
+                
+                if [ -z "$CURRENT_VERSION" ]; then
+                  echo "Error: Could not find roslyn version in package.json"
+                  exit 1
+                fi
+                
+                echo "Current Roslyn version: $CURRENT_VERSION"
+                echo "##vso[task.setvariable variable=RoslynStartSHA]$CURRENT_VERSION"
+                
+                # Download and extract commit SHA from NuGet package
+                TEMP_DIR=$(mktemp -d)
+                cd "$TEMP_DIR"
+                
+                PACKAGE_NAME="microsoft.codeanalysis.common"
+                DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
+                PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$CURRENT_VERSION/$PACKAGE_NAME.$CURRENT_VERSION.nupkg"
+                
+                if curl -f -L -o package.nupkg "$PACKAGE_URL"; then
+                  unzip -q package.nupkg
+                  NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
+                  if [ -n "$NUSPEC_FILE" ]; then
+                    START_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1 || echo "")
+                    if [ -n "$START_SHA" ]; then
+                      echo "##vso[task.setvariable variable=RoslynStartSHA]$START_SHA"
+                      echo "Current Roslyn SHA: $START_SHA"
+                    fi
+                  fi
+                fi
+                
+                cd - >/dev/null
+                rm -rf "$TEMP_DIR"
 
           - task: Bash@3
             displayName: Get latest Roslyn build and version
@@ -111,51 +158,6 @@ stages:
                   echo "Getting latest commit from GitHub..."
                   END_SHA=$(curl -s "https://api.github.com/repos/dotnet/roslyn/commits/main" | jq -r '.sha // empty')
                   echo "##vso[task.setvariable variable=RoslynEndSHA]$END_SHA"
-                fi
-
-          - task: DownloadPipelineArtifact@2
-            displayName: Download AssetManifests
-            inputs:
-              source: specific
-              project: internal
-              pipeline: $(resources.pipeline.officialBuildCI.pipelineID)
-              runVersion: specific
-              runId: $(resources.pipeline.officialBuildCI.runID)
-              artifactName: AssetManifests
-              targetPath: $(Pipeline.Workspace)/AssetManifests
-
-          - task: Bash@3
-            displayName: Extract Roslyn version from AssetManifests
-            inputs:
-              targetType: inline
-              script: |
-                set -euo pipefail
-                
-                # Parse OfficialBuild.xml to get version
-                XML_FILE="$(Pipeline.Workspace)/AssetManifests/OfficialBuild.xml"
-                
-                if [ -f "$XML_FILE" ]; then
-                  # Extract version for Microsoft.CodeAnalysis.Common package
-                  VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis\.Common"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
-                  
-                  if [ -z "$VERSION" ]; then
-                    # Try alternative pattern
-                    VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
-                  fi
-                  
-                  if [ -n "$VERSION" ]; then
-                    echo "##vso[task.setvariable variable=RoslynVersion]$VERSION"
-                    echo "Latest Roslyn version: $VERSION"
-                  fi
-                  
-                  # Also extract commit from Build element for verification
-                  COMMIT=$(grep -oP '<Build[^>]*Commit="\K[^"]+' "$XML_FILE" | head -n1)
-                  if [ -n "$COMMIT" ]; then
-                    echo "Commit from AssetManifest: $COMMIT"
-                  fi
-                else
-                  echo "Error: OfficialBuild.xml not found"
-                  exit 1
                 fi
 
           - task: Bash@3
