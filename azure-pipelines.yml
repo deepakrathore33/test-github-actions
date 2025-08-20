@@ -12,13 +12,13 @@ schedules:
 resources:
   pipelines:
     - pipeline: officialBuildCI
-      source: dotnet-roslyn-official
+      source: 327  # Use the pipeline ID directly instead of name
       project: internal
-      branch: main
+      branch: refs/heads/main  # Use full branch reference
       trigger:
         branches:
           include:
-            - main
+            - refs/heads/main
 
 pool:
   vmImage: ubuntu-latest
