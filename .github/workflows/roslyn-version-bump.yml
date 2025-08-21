@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '0 9 * * *'
   workflow_dispatch:
-    inputs:
-      roslyn_version:
-        description: 'Specific Roslyn version (optional)'
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -84,33 +79,103 @@ jobs:
         run: |
           set -euo pipefail
           
-          # If specific version provided, use it
-          if [ -n "${{ github.event.inputs.roslyn_version }}" ]; then
-            VERSION="${{ github.event.inputs.roslyn_version }}"
-            echo "Using specified version: $VERSION"
+          echo "Getting latest Roslyn build from Azure DevOps..."
+          
+          # Use Azure DevOps PAT if available
+          if [ -n "${{ secrets.AZURE_DEVOPS_PAT }}" ]; then
+            echo "Using Azure DevOps PAT for authentication"
             
-            # Still need to get the commit SHA for this version
-            TEMP_DIR=$(mktemp -d)
-            cd "$TEMP_DIR"
+            # Query Azure DevOps for the latest successful build from internal project
+            AZDO_ORG="https://dev.azure.com/dnceng"
+            PROJECT="internal"
+            PIPELINE_ID="327"  # dotnet-roslyn-official pipeline ID
             
-            PACKAGE_NAME="microsoft.codeanalysis.common"
-            DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
-            PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
+            # Create authorization header
+            AUTH_HEADER="Authorization: Basic $(echo -n ':${{ secrets.AZURE_DEVOPS_PAT }}' | base64)"
             
-            curl -f -L -o package.nupkg "$PACKAGE_URL"
-            unzip -q package.nupkg
+            # Get the latest successful build from main branch
+            BUILD_URL="$AZDO_ORG/$PROJECT/_apis/build/builds?definitions=$PIPELINE_ID&branchName=refs/heads/main&statusFilter=completed&resultFilter=succeeded&\$top=1&api-version=7.0"
             
-            NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
-            END_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1)
+            echo "Fetching latest build info..."
+            BUILD_INFO=$(curl -s -H "Accept: application/json" -H "$AUTH_HEADER" "$BUILD_URL")
             
-            cd - >/dev/null
-            rm -rf "$TEMP_DIR"
+            # Check if response is valid JSON
+            if ! echo "$BUILD_INFO" | jq empty 2>/dev/null; then
+              echo "Error: Invalid response from Azure DevOps API"
+              exit 1
+            fi
             
-            # Set default values for build info
-            BUILD_ID="manual"
-            BUILD_NUMBER="$VERSION"
+            # Extract build information
+            BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id // empty')
+            END_SHA=$(echo "$BUILD_INFO" | jq -r '.value[0].sourceVersion // empty')
+            BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber // empty')
+            
+            if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
+              echo "Error: Could not get build ID"
+              exit 1
+            fi
+            
+            echo "Latest build: $BUILD_NUMBER (ID: $BUILD_ID)"
+            echo "Commit SHA: $END_SHA"
+            
+            # Download AssetManifests artifact
+            ARTIFACT_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?artifactName=AssetManifests&api-version=7.0"
+            
+            echo "Getting AssetManifests artifact info..."
+            ARTIFACT_INFO=$(curl -s -H "Accept: application/json" -H "$AUTH_HEADER" "$ARTIFACT_URL")
+            DOWNLOAD_URL=$(echo "$ARTIFACT_INFO" | jq -r '.resource.downloadUrl // empty')
+            
+            if [ -n "$DOWNLOAD_URL" ] && [ "$DOWNLOAD_URL" != "null" ]; then
+              # Download and extract AssetManifests
+              TEMP_DIR=$(mktemp -d)
+              cd "$TEMP_DIR"
+              
+              echo "Downloading AssetManifests..."
+              curl -s -L -H "$AUTH_HEADER" -o assetmanifests.zip "$DOWNLOAD_URL"
+              
+              # Extract the zip file
+              unzip -q assetmanifests.zip || unzip -q -j assetmanifests.zip
+              
+              # Find and parse OfficialBuild.xml
+              XML_FILE=$(find . -name "OfficialBuild.xml" | head -n1)
+              
+              if [ -n "$XML_FILE" ]; then
+                echo "Found OfficialBuild.xml, extracting version..."
+                
+                # Extract version from the XML
+                VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
+                
+                if [ -z "$VERSION" ]; then
+                  VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis\.Common"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
+                fi
+                
+                if [ -n "$VERSION" ]; then
+                  echo "Extracted version from AssetManifest: $VERSION"
+                  
+                  # Also verify commit from Build element
+                  COMMIT_FROM_XML=$(grep -oP '<Build[^>]*Commit="\K[^"]+' "$XML_FILE" | head -n1)
+                  if [ -n "$COMMIT_FROM_XML" ]; then
+                    echo "Commit from AssetManifest: $COMMIT_FROM_XML"
+                    END_SHA="$COMMIT_FROM_XML"
+                  fi
+                fi
+              fi
+              
+              cd - >/dev/null
+              rm -rf "$TEMP_DIR"
+            fi
+            
+            # If we couldn't get version from AssetManifests, construct it
+            if [ -z "$VERSION" ]; then
+              VERSION="5.0.0-ci.$BUILD_NUMBER"
+              echo "Using constructed version: $VERSION"
+            fi
+            
+            AZDO_ORG="https://dev.azure.com/dnceng"
+            PROJECT="internal"
+            
           else
-            echo "Getting latest Roslyn build from Azure DevOps..."
+            echo "No Azure DevOps PAT configured, falling back to NuGet feed approach..."
             
             # Query Azure DevOps for the latest successful build
             AZDO_ORG="https://dev.azure.com/dnceng"
