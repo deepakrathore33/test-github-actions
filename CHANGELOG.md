@@ -4,7 +4,7 @@
 - Debug from .csproj and .sln [#5876](https://github.com/dotnet/vscode-csharp/issues/5876)
 
 # 2.89.x
-* Bump Roslyn to 5.0.0-2.25412.5 (PR: [#8527](https://github.com/dotnet/vscode-csharp/pull/8527))
+* Bump Roslyn to 3.8.0-3.20427.2 (PR: [#TBD](TBD))
   * Don't try to load file based projects unless we get a .cs file(PR: [#79844](https://github.com/dotnet/roslyn/pull/79844))
   * Workaround VSCode's lack of support for case sorting in completion(PR: [#79772](https://github.com/dotnet/roslyn/pull/79772))
   * Add messages for when design time builds begin and complete(PR: [#79669](https://github.com/dotnet/roslyn/pull/79669))
