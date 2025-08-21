@@ -11,9 +11,10 @@ schedules:
 resources:
   pipelines:
     - pipeline: officialBuildCI
-      source: dotnet/roslyn-official
+      source: 327  # Use the pipeline ID directly
       project: internal
       branch: refs/heads/main
+      trigger: none  # Don't trigger automatically
 
 pool:
   vmImage: ubuntu-latest  # Or use your self-hosted agent pool
