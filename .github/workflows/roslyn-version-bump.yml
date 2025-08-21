@@ -65,6 +65,27 @@ jobs:
         run: |
           set -euo pipefail
           
+          # TEMPORARY HARDCODED VALUES FOR TESTING
+          echo "WARNING: Using hardcoded values for testing"
+          END_SHA="9d89ea98ce96a9ecf1a4df426dc6b3d57ebc7e85"
+          VERSION="5.5.5.5.5.5.5.5"
+          BUILD_ID="test-build"
+          BUILD_NUMBER="test-20241120"
+          AZDO_ORG="https://dev.azure.com/dnceng"
+          PROJECT="internal"
+          
+          # Set output variables
+          echo "end=$END_SHA" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "build_url=$AZDO_ORG/$PROJECT/_build/results?buildId=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          
+          # Skip the no_change check for testing
+          echo "no_change=false" >> $GITHUB_OUTPUT
+          
+          # COMMENT OUT THE REAL IMPLEMENTATION BELOW FOR TESTING
+          : <<'REAL_IMPLEMENTATION'
           # Check if Azure DevOps PAT is configured
           if [ -z "${{ secrets.AZURE_DEVOPS_PAT }}" ]; then
             echo "Error: AZURE_DEVOPS_PAT secret is not configured"
@@ -157,6 +178,7 @@ jobs:
           if [ "${{ steps.current.outputs.start }}" = "$END_SHA" ]; then
             echo "no_change=true" >> $GITHUB_OUTPUT
           fi
+          REAL_IMPLEMENTATION
 
       - name: Clone roslyn for PR finder
         if: steps.latest.outputs.no_change != 'true'
