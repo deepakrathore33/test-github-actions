@@ -105,95 +105,123 @@ jobs:
             
             cd - >/dev/null
             rm -rf "$TEMP_DIR"
+            
+            # Set default values for build info
+            BUILD_ID="manual"
+            BUILD_NUMBER="$VERSION"
           else
             echo "Getting latest Roslyn build from Azure DevOps..."
             
             # Query Azure DevOps for the latest successful build
             AZDO_ORG="https://dev.azure.com/dnceng"
-            PROJECT="internal"
-            PIPELINE_ID="327"  # dotnet-roslyn-official pipeline ID
+            PROJECT="public"  # Try public project first
+            PIPELINE_ID="15"  # dotnet-roslyn pipeline ID in public project
             
             # Get the latest successful build from main branch
             BUILD_URL="$AZDO_ORG/$PROJECT/_apis/build/builds?definitions=$PIPELINE_ID&branchName=refs/heads/main&statusFilter=completed&resultFilter=succeeded&\$top=1&api-version=7.0"
             
-            echo "Fetching latest build info..."
-            BUILD_INFO=$(curl -s -H "Accept: application/json" "$BUILD_URL")
+            echo "Fetching latest build info from URL: $BUILD_URL"
             
-            # Extract build ID and commit SHA
-            BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id // empty')
-            END_SHA=$(echo "$BUILD_INFO" | jq -r '.value[0].sourceVersion // empty')
-            BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber // empty')
+            # Fetch with verbose output to see what's happening
+            BUILD_INFO=$(curl -s -H "Accept: application/json" "$BUILD_URL" 2>&1)
             
-            if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
-              echo "Error: Could not get build ID from Azure DevOps"
-              exit 1
-            fi
-            
-            echo "Latest build: $BUILD_NUMBER (ID: $BUILD_ID)"
-            echo "Commit SHA: $END_SHA"
-            
-            # Download AssetManifests artifact to get the exact version
-            ARTIFACT_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?artifactName=AssetManifests&api-version=7.0"
-            
-            echo "Getting AssetManifests download URL..."
-            ARTIFACT_INFO=$(curl -s -H "Accept: application/json" "$ARTIFACT_URL")
-            DOWNLOAD_URL=$(echo "$ARTIFACT_INFO" | jq -r '.resource.downloadUrl // empty')
-            
-            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-              echo "Warning: Could not get AssetManifests download URL, trying direct download"
-              # Try direct download URL pattern
-              DOWNLOAD_URL="$AZDO_ORG/$PROJECT/_apis/build/builds/$BUILD_ID/artifacts?artifactName=AssetManifests&api-version=7.0&%24format=zip"
-            fi
-            
-            # Download and extract AssetManifests
-            TEMP_DIR=$(mktemp -d)
-            cd "$TEMP_DIR"
-            
-            echo "Downloading AssetManifests..."
-            curl -L -o assetmanifests.zip "$DOWNLOAD_URL"
-            
-            # Extract the zip file
-            unzip -q assetmanifests.zip || unzip -q -j assetmanifests.zip
-            
-            # Find and parse OfficialBuild.xml
-            XML_FILE=$(find . -name "OfficialBuild.xml" -o -name "*.xml" | head -n1)
-            
-            if [ -z "$XML_FILE" ]; then
-              echo "Error: OfficialBuild.xml not found in AssetManifests"
-              ls -la
-              exit 1
-            fi
-            
-            echo "Found XML file: $XML_FILE"
-            
-            # Extract version from the XML
-            VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
-            
-            if [ -z "$VERSION" ]; then
-              # Try Microsoft.CodeAnalysis.Common
-              VERSION=$(grep -oP 'Id="Microsoft\.CodeAnalysis\.Common"[^>]*Version="\K[^"]+' "$XML_FILE" | head -n1)
-            fi
-            
-            if [ -z "$VERSION" ]; then
-              echo "Error: Could not extract version from OfficialBuild.xml"
-              cat "$XML_FILE" | head -20
-              exit 1
-            fi
-            
-            # Also verify commit from Build element
-            COMMIT_FROM_XML=$(grep -oP '<Build[^>]*Commit="\K[^"]+' "$XML_FILE" | head -n1)
-            if [ -n "$COMMIT_FROM_XML" ]; then
-              echo "Commit from AssetManifest: $COMMIT_FROM_XML"
-              # Use this as the authoritative commit if available
-              if [ -n "$COMMIT_FROM_XML" ]; then
-                END_SHA="$COMMIT_FROM_XML"
+            # Check if we got HTML instead of JSON (common error response)
+            if echo "$BUILD_INFO" | grep -q "<!DOCTYPE"; then
+              echo "Error: Received HTML response instead of JSON. The API endpoint might be incorrect or require authentication."
+              echo "Response preview: ${BUILD_INFO:0:500}"
+              
+              # Fallback to querying NuGet feed for latest version
+              echo "Falling back to NuGet feed for latest version..."
+              
+              PACKAGE_NAME="microsoft.codeanalysis.common"
+              PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+              
+              echo "Fetching package index from: $PACKAGE_INDEX"
+              VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
+              
+              if [ -z "$VERSIONS" ]; then
+                # Try dotnet8 feed as fallback
+                PACKAGE_INDEX="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet8/nuget/v3/flat2/$PACKAGE_NAME/index.json"
+                echo "Trying dotnet8 feed: $PACKAGE_INDEX"
+                VERSIONS=$(curl -s "$PACKAGE_INDEX" | jq -r '.versions[]' 2>/dev/null || echo "")
               fi
+              
+              # Get the latest prerelease version
+              VERSION=$(echo "$VERSIONS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-' | tail -n1)
+              
+              if [ -z "$VERSION" ]; then
+                echo "Error: Could not find any Roslyn versions in feed"
+                exit 1
+              fi
+              
+              echo "Latest version from NuGet feed: $VERSION"
+              
+              # Download package to get commit SHA
+              TEMP_DIR=$(mktemp -d)
+              cd "$TEMP_DIR"
+              
+              DOTNET_TOOLS_FEED="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/flat2"
+              PACKAGE_URL="$DOTNET_TOOLS_FEED/$PACKAGE_NAME/$VERSION/$PACKAGE_NAME.$VERSION.nupkg"
+              
+              echo "Downloading package from: $PACKAGE_URL"
+              curl -f -L -o package.nupkg "$PACKAGE_URL"
+              unzip -q package.nupkg
+              
+              NUSPEC_FILE=$(find . -name "*.nuspec" -type f | head -n1)
+              END_SHA=$(grep -oP 'repository[^>]*commit="\K[a-f0-9]{40}' "$NUSPEC_FILE" | head -n1)
+              
+              cd - >/dev/null
+              rm -rf "$TEMP_DIR"
+              
+              # Set default values for build info
+              BUILD_ID="nuget"
+              BUILD_NUMBER="$VERSION"
+              AZDO_ORG="https://github.com/dotnet/roslyn"
+              PROJECT="commit"
+            else
+              # Try to parse as JSON
+              echo "Parsing API response as JSON..."
+              
+              # Save response for debugging
+              echo "$BUILD_INFO" > /tmp/build_info.json
+              echo "Response saved to /tmp/build_info.json"
+              
+              # Check if response is valid JSON
+              if ! echo "$BUILD_INFO" | jq empty 2>/dev/null; then
+                echo "Error: Invalid JSON response from Azure DevOps API"
+                echo "Response preview: ${BUILD_INFO:0:500}"
+                exit 1
+              fi
+              
+              # Check if we got any builds
+              BUILD_COUNT=$(echo "$BUILD_INFO" | jq '.count // 0')
+              echo "Number of builds returned: $BUILD_COUNT"
+              
+              if [ "$BUILD_COUNT" -eq 0 ]; then
+                echo "No builds found. Response:"
+                echo "$BUILD_INFO" | jq '.'
+                exit 1
+              fi
+              
+              # Extract build ID and commit SHA
+              BUILD_ID=$(echo "$BUILD_INFO" | jq -r '.value[0].id // empty')
+              END_SHA=$(echo "$BUILD_INFO" | jq -r '.value[0].sourceVersion // empty')
+              BUILD_NUMBER=$(echo "$BUILD_INFO" | jq -r '.value[0].buildNumber // empty')
+              
+              if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
+                echo "Error: Could not get build ID from Azure DevOps"
+                echo "Build info:"
+                echo "$BUILD_INFO" | jq '.value[0]'
+                exit 1
+              fi
+              
+              echo "Latest build: $BUILD_NUMBER (ID: $BUILD_ID)"
+              echo "Commit SHA: $END_SHA"
+              
+              # For now, use build number as version since AssetManifests download requires auth
+              VERSION="5.0.0-ci.$BUILD_NUMBER"
+              echo "Using constructed version: $VERSION"
             fi
-            
-            cd - >/dev/null
-            rm -rf "$TEMP_DIR"
-            
-            echo "Latest Roslyn version from AssetManifest: $VERSION"
           fi
           
           echo "end=$END_SHA" >> $GITHUB_OUTPUT
@@ -202,8 +230,10 @@ jobs:
           echo "build_url=$AZDO_ORG/$PROJECT/_build/results?buildId=$BUILD_ID" >> $GITHUB_OUTPUT
           echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
           
-          echo "Latest Roslyn commit: $END_SHA"
-          echo "Latest Roslyn version: $VERSION"
+          echo "Final values:"
+          echo "  Roslyn commit: $END_SHA"
+          echo "  Roslyn version: $VERSION"
+          echo "  Build ID: $BUILD_ID"
           
           if [ "${{ steps.current.outputs.start }}" = "$END_SHA" ]; then
             echo "no_change=true" >> $GITHUB_OUTPUT
